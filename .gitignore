@@ -1,0 +1,124 @@
+# =============================================================================
+# Nile-ViT .gitignore
+# =============================================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------- Virtual envs / package managers ----------
+.venv/
+venv/
+env/
+ENV/
+.uv-cache/
+# Note: we DO commit uv.lock for reproducibility.
+
+# ---------- Testing / coverage ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ---------- Type checking ----------
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+*.ipynb_checkpoints
+
+# ---------- ML artifacts ----------
+wandb/
+mlruns/
+lightning_logs/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+runs/
+outputs/
+logs/
+
+# ---------- Data (NEVER commit) ----------
+data/raw/
+data/interim/
+data/processed/
+data/external/
+data/cache/
+*.tif
+*.tiff
+*.nc
+*.h5
+*.hdf5
+*.zarr
+*.zarr/
+*.parquet
+*.geoparquet
+*.npy
+*.npz
+# allow tiny test fixtures
+!tests/data/fixtures/
+!tests/data/fixtures/**
+
+# ---------- Secrets / credentials ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*secrets*
+.netrc
+.cdsapirc
+.earthdata-cookies
+
+# ---------- IDE / editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.qodo/
+.cursor/
+.windsurf/
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------- Documentation builds ----------
+docs/_build/
+docs/_autosummary/
+site/
+
+# ---------- Misc ----------
+*.log
+*.tmp
+*.bak
+.scratch/

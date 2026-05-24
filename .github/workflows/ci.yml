@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dev deps only (skip heavy ML stack for lint)
+        # Install only what ruff/mypy actually need. Heavy deps (torch,
+        # terratorch, geospatial stack) are installed in the `test` job.
+        run: |
+          uv venv
+          uv pip install ruff mypy
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy nilevit || true  # non-blocking for now
+
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install full deps (CPU-only for CI)
+        env:
+          # Force CPU torch index for CI to keep wheel size manageable
+          UV_INDEX_PYTORCH_CU121_URL: https://download.pytorch.org/whl/cpu
+        run: uv sync --extra dev
+
+      - name: Run tests (fast subset)
+        run: uv run pytest -m "not slow and not gpu and not network" -q
