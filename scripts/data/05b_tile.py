@@ -288,7 +288,13 @@ def main(
             shutil.rmtree(zarr_path)
         parquet_path.unlink(missing_ok=True)
 
-    total_written, total_dropped = 0, 0
+    # Known sample_ids already in the index -> skip on re-run (idempotent append).
+    known_ids: set[str] = set()
+    if parquet_path.exists() and not dry_run:
+        known_ids = set(gpd.read_parquet(parquet_path)["sample_id"].tolist())
+        console.print(f"[dim]{len(known_ids)} sample(s) already indexed; skipping those.[/dim]")
+
+    total_written, total_dropped, total_dup = 0, 0, 0
     for d in dates:
         ref = find_hls_b04(hls_dir, d)
         if ref is None:
@@ -350,6 +356,10 @@ def main(
             cy, cx = y0 + PATCH // 2, x0 + PATCH // 2
             lon, lat = transformer.transform(float(xs[cx]), float(ys[cy]))
             sid = make_sample_id(tile, d, r, c)
+            if sid in known_ids:
+                total_dup += 1
+                continue
+            known_ids.add(sid)
             images.append(stack[:, sl[0], sl[1]])
             rows.append(
                 {
@@ -410,7 +420,8 @@ def main(
         raise typer.Exit(code=0)
 
     console.print(
-        f"[green]Done: {total_written} patches written, " f"{total_dropped} dropped.[/green]"
+        f"[green]Done: {total_written} written, {total_dropped} dropped "
+        f"(low valid), {total_dup} skipped (dup).[/green]"
     )
 
     # ---- Verify ----
