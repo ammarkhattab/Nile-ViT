@@ -196,15 +196,41 @@ def download_to(url: str, dest: Path, expected_size: int | None = None) -> None:
     tmp.replace(dest)
 
 
+def _clean_value(v):
+    """Scrub characters that can't round-trip through UTF-8 (lone surrogates).
+
+    CHIRPS v3 monthly files occasionally carry global/variable attributes with
+    bytes that decode to lone surrogates; xarray's NetCDF writer then fails with
+    "surrogates not allowed". We only need the data + coords, so replacing the
+    offending characters in attribute strings is safe.
+    """
+    if isinstance(v, str):
+        return v.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return v
+
+
+def _sanitize_attrs(ds) -> None:
+    """In place: scrub surrogate chars from dataset, variable, and coord attrs."""
+
+    def scrub(attrs: dict) -> dict:
+        return {_clean_value(k): _clean_value(v) for k, v in attrs.items()}
+
+    ds.attrs = scrub(ds.attrs)
+    for name in list(ds.variables):
+        ds[name].attrs = scrub(ds[name].attrs)
+
+
 def subset_netcdf(src: Path, dst: Path, area: tuple[float, float, float, float]) -> None:
     """Open `src`, slice to (N, W, S, E) area, write `dst`. Uses xarray."""
     import xarray as xr
 
     north, west, south, east = area
     with xr.open_dataset(src) as ds:
-        # CHIRPS uses lat ascending; sel with slice requires (low, high) i.e. (south, north).
-        # Variable name in CHIRPS v3 NetCDF is 'precip' with coords latitude/longitude OR
-        # latitude/longitude/time - we accept either lat/lon shorthand.
+        # CHIRPS lat is ascending; slicing needs (low, high) = (south, north).
+        # The data var is 'precip'; coords are latitude/longitude (or lat/lon),
+        # optionally with a time dim - we accept either coord naming.
         lat_name = "latitude" if "latitude" in ds.coords else "lat"
         lon_name = "longitude" if "longitude" in ds.coords else "lon"
 
@@ -213,12 +239,40 @@ def subset_netcdf(src: Path, dst: Path, area: tuple[float, float, float, float])
         lat_slice = slice(south, north) if lat_vals[0] < lat_vals[-1] else slice(north, south)
 
         sub = ds.sel({lat_name: lat_slice, lon_name: slice(west, east)})
+        _sanitize_attrs(sub)  # scrub surrogate bytes so to_netcdf can encode
         # Encode small to save bytes.
         encoding = {
             v: {"zlib": True, "complevel": 4} for v in sub.data_vars if sub[v].dtype.kind == "f"
         }
         dst.parent.mkdir(parents=True, exist_ok=True)
         sub.to_netcdf(dst, encoding=encoding, engine="h5netcdf")
+
+
+def days_in_month(year: int, month: int) -> int:
+    """Number of days in a given year/month."""
+    import calendar
+
+    return calendar.monthrange(year, month)[1]
+
+
+def subset_is_valid(path: Path, expected_time: int) -> bool:
+    """True if `path` opens as NetCDF with a 'precip' var and the expected days.
+
+    Guards against truncated/corrupt leftovers from a failed write being skipped
+    on a later run (the existence check alone can't tell a good file from a bad
+    one). If xarray is unavailable we can't check, so we assume valid.
+    """
+    try:
+        import xarray as xr
+    except ImportError:
+        return True
+    try:
+        with xr.open_dataset(path) as ds:
+            if "precip" not in ds.data_vars or "time" not in ds.sizes:
+                return False
+            return int(ds.sizes["time"]) == expected_time
+    except Exception:
+        return False
 
 
 @app.command()
@@ -345,13 +399,12 @@ def main(
         console.print()
         if any_ok:
             console.print(
-                "[green]At least one URL resolved.[/green] Re-run without --probe to download."
+                "[green]At least one URL resolved.[/green] " "Re-run without --probe to download."
             )
             raise typer.Exit(code=0)
         console.print(
-            "[red]No URLs resolved.[/red] Check "
-            "https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/final/rnl/netcdf/byMonth/ "
-            "for current availability."
+            "[red]No URLs resolved.[/red] Check the CHIRPS v3 byMonth directory "
+            "at data.chc.ucsb.edu for current availability."
         )
         raise typer.Exit(code=1)
 
@@ -364,9 +417,16 @@ def main(
 
         final_needed = subset_path if subset else global_path
         if final_needed.exists() and not overwrite:
-            console.print(f"  [yellow]SKIP[/yellow] {final_needed.name} (exists)")
-            n_skip += 1
-            continue
+            if subset and not subset_is_valid(subset_path, days_in_month(y, m)):
+                console.print(
+                    f"  [yellow]RE-MAKE[/yellow] {final_needed.name} "
+                    "(exists but invalid/corrupt)"
+                )
+                # fall through to re-download + re-subset
+            else:
+                console.print(f"  [yellow]SKIP[/yellow] {final_needed.name} (exists)")
+                n_skip += 1
+                continue
 
         # Probe before download to surface bad URLs fast.
         ok, code, expected_size = head_exists(url)
@@ -439,12 +499,10 @@ def main(
                 console.print(f"  {time_coord:11s} : {t.min().values} -> {t.max().values}")
             lat_name = "latitude" if "latitude" in ds.coords else "lat"
             lon_name = "longitude" if "longitude" in ds.coords else "lon"
-            console.print(
-                f"  {lat_name:11s} : {float(ds[lat_name].min()):.2f} -> {float(ds[lat_name].max()):.2f}"
-            )
-            console.print(
-                f"  {lon_name:11s} : {float(ds[lon_name].min()):.2f} -> {float(ds[lon_name].max()):.2f}"
-            )
+            lo_a, hi_a = float(ds[lat_name].min()), float(ds[lat_name].max())
+            lo_o, hi_o = float(ds[lon_name].min()), float(ds[lon_name].max())
+            console.print(f"  {lat_name:11s} : {lo_a:.2f} -> {hi_a:.2f}")
+            console.print(f"  {lon_name:11s} : {lo_o:.2f} -> {hi_o:.2f}")
             if "precip" in ds.data_vars:
                 p = ds["precip"]
                 console.print(f"  precip shape: {p.shape}")

@@ -161,3 +161,97 @@ class TestParseMonthCompat:
     def test_feb_non_leap(self, chirps_mod):
         _, last = chirps_mod.parse_month("2023-02")
         assert last == date(2023, 2, 28)
+
+
+# ---- attribute sanitizer (surrogate scrubbing) -------------------------------
+class TestSanitizeAttrs:
+    def test_clean_value_scrubs_surrogate_str(self, chirps_mod):
+        bad = "ok\udce9bad"  # lone surrogate that breaks utf-8 encoding
+        cleaned = chirps_mod._clean_value(bad)
+        # must now round-trip through utf-8 without raising
+        cleaned.encode("utf-8")
+        assert "ok" in cleaned and "bad" in cleaned
+
+    def test_clean_value_decodes_bytes(self, chirps_mod):
+        assert chirps_mod._clean_value(b"hello") == "hello"
+
+    def test_clean_value_passes_through_non_strings(self, chirps_mod):
+        assert chirps_mod._clean_value(42) == 42
+        assert chirps_mod._clean_value(3.5) == 3.5
+
+    def test_sanitize_attrs_on_dataset(self, chirps_mod):
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {"precip": ("x", np.arange(3.0))},
+            coords={"x": [0, 1, 2]},
+            attrs={"history": "made\udce9here", "ok": "fine"},
+        )
+        ds["precip"].attrs["note"] = "bad\udcffbyte"
+        chirps_mod._sanitize_attrs(ds)
+        # every attr must now encode cleanly
+        for v in ds.attrs.values():
+            if isinstance(v, str):
+                v.encode("utf-8")
+        for v in ds["precip"].attrs.values():
+            if isinstance(v, str):
+                v.encode("utf-8")
+        assert ds.attrs["ok"] == "fine"
+
+
+# ---- days_in_month -----------------------------------------------------------
+class TestDaysInMonth:
+    def test_august(self, chirps_mod):
+        assert chirps_mod.days_in_month(2023, 8) == 31
+
+    def test_september(self, chirps_mod):
+        assert chirps_mod.days_in_month(2023, 9) == 30
+
+    def test_feb_leap(self, chirps_mod):
+        assert chirps_mod.days_in_month(2024, 2) == 29
+
+    def test_feb_non_leap(self, chirps_mod):
+        assert chirps_mod.days_in_month(2023, 2) == 28
+
+
+# ---- subset_is_valid ---------------------------------------------------------
+class TestSubsetIsValid:
+    def _write(self, tmp_path, n_time, var="precip"):
+        xr = pytest.importorskip("xarray")
+        import numpy as np
+
+        ds = xr.Dataset(
+            {var: (("time", "latitude", "longitude"), np.zeros((n_time, 2, 2)))},
+            coords={
+                "time": np.arange(n_time),
+                "latitude": [30.0, 31.0],
+                "longitude": [22.0, 23.0],
+            },
+        )
+        p = tmp_path / "sub.nc"
+        ds.to_netcdf(p, engine="h5netcdf")
+        return p
+
+    def test_valid_file(self, chirps_mod, tmp_path):
+        p = self._write(tmp_path, 30)
+        assert chirps_mod.subset_is_valid(p, 30) is True
+
+    def test_wrong_time_length(self, chirps_mod, tmp_path):
+        # truncated: only 10 of 30 days
+        p = self._write(tmp_path, 10)
+        assert chirps_mod.subset_is_valid(p, 30) is False
+
+    def test_missing_precip(self, chirps_mod, tmp_path):
+        p = self._write(tmp_path, 30, var="other")
+        assert chirps_mod.subset_is_valid(p, 30) is False
+
+    def test_corrupt_file(self, chirps_mod, tmp_path):
+        pytest.importorskip("xarray")
+        bad = tmp_path / "bad.nc"
+        bad.write_bytes(b"not a netcdf file at all")
+        assert chirps_mod.subset_is_valid(bad, 30) is False
+
+    def test_missing_file(self, chirps_mod, tmp_path):
+        pytest.importorskip("xarray")
+        assert chirps_mod.subset_is_valid(tmp_path / "nope.nc", 30) is False
