@@ -124,3 +124,37 @@ class TestCheckpoint:
 
     def test_ckpt_path_naming(self, mod, tmp_path):
         assert mod.ckpt_path(tmp_path, "lst").name == ".ckpt_lst.npz"
+
+
+# ---- HTTP resilience helpers -------------------------------------------------
+class TestResilientRead:
+    def test_configure_gdal_http_sets_caps(self, mod, monkeypatch):
+        import os
+
+        monkeypatch.delenv("GDAL_HTTP_TIMEOUT", raising=False)
+        mod.configure_gdal_http(timeout=77)
+        assert os.environ["GDAL_HTTP_TIMEOUT"] == "77"
+        assert int(os.environ["GDAL_HTTP_MAX_RETRY"]) >= 1
+        assert int(os.environ["GDAL_HTTP_CONNECTTIMEOUT"]) >= 1
+
+    def test_read_clipped_retries_then_succeeds(self, mod, monkeypatch):
+        calls = {"n": 0}
+
+        def fake(href, bbox):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise OSError("stalled socket")
+            return "DA"
+
+        monkeypatch.setattr(mod, "_open_clip", fake)
+        # delay=0 keeps the test instant
+        assert mod.read_clipped("href", mod.ROI_BBOX, retries=3, delay=0) == "DA"
+        assert calls["n"] == 3
+
+    def test_read_clipped_raises_after_exhausting_retries(self, mod, monkeypatch):
+        def fake(href, bbox):
+            raise OSError("dead host")
+
+        monkeypatch.setattr(mod, "_open_clip", fake)
+        with pytest.raises(RuntimeError, match="after 3 attempts"):
+            mod.read_clipped("href", mod.ROI_BBOX, retries=3, delay=0)

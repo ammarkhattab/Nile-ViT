@@ -36,6 +36,7 @@ Tip: validate the whole label pipeline on a short range first
 from __future__ import annotations
 
 import contextlib
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -121,6 +122,56 @@ def update_minmax(acc_min, acc_max, values, valid):
     return np.fmin(acc_min, masked), np.fmax(acc_max, masked)
 
 
+def configure_gdal_http(timeout: int = 60) -> None:
+    """Bound /vsicurl reads so a stalled MPC connection can't hang forever.
+
+    GDAL's curl layer has no read timeout by default, so one dead socket wedges
+    the whole run (the symptom: a year that searched fine but never finishes).
+    These caps make a stalled read abort within ~timeout seconds and retry a
+    few times before giving up, so the per-item retry loop can skip it.
+    """
+    os.environ["GDAL_HTTP_TIMEOUT"] = str(timeout)
+    os.environ["GDAL_HTTP_CONNECTTIMEOUT"] = "20"
+    os.environ["GDAL_HTTP_MAX_RETRY"] = "3"
+    os.environ["GDAL_HTTP_RETRY_DELAY"] = "2"
+    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    os.environ.setdefault("CPL_VSIL_CURL_USE_HEAD", "NO")
+    os.environ.setdefault("VSI_CACHE", "TRUE")
+
+
+def _open_clip(href: str, bbox: tuple[float, float, float, float]):
+    """Open a COG href and read the ROI window into memory (the I/O step)."""
+    import rioxarray
+
+    da = rioxarray.open_rasterio(href).rio.clip_box(*bbox, crs="EPSG:4326")
+    return da.load()
+
+
+def read_clipped(
+    href: str,
+    bbox: tuple[float, float, float, float],
+    retries: int = 3,
+    delay: float = 3.0,
+):
+    """Read a clipped COG with retry; raise RuntimeError after `retries` fails.
+
+    Any failure (including a GDAL timeout from a stalled socket) is retried;
+    after the last attempt it raises so the caller can skip the composite
+    rather than hang or abort the whole run.
+    """
+    import time
+
+    last: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _open_clip(href, bbox)
+        except Exception as exc:
+            last = exc
+            if attempt < retries:
+                time.sleep(delay)
+    raise RuntimeError(f"read failed after {retries} attempts: {last}")
+
+
 def ckpt_path(out_dir: Path, var: str) -> Path:
     """Path of the resumability checkpoint for a variable."""
     return out_dir / f".ckpt_{var}.npz"
@@ -201,13 +252,13 @@ def main(
         import numpy as np
         import planetary_computer as pc
         import pystac_client
-        import rioxarray
-        from rioxarray.exceptions import NoDataInBounds
+        import rioxarray  # noqa: F401
     except ImportError as exc:
         console.print(f"[red]ERROR[/red] missing deps: {exc}")
         raise typer.Exit(code=1) from None
 
-    client = pystac_client.Client.open(MPC_STAC_URL, modifier=pc.sign_inplace)
+    configure_gdal_http()
+    client = pystac_client.Client.open(MPC_STAC_URL)
 
     # Per-tile accumulators + transform/crs captured from the first read.
     acc: dict = {}
@@ -238,14 +289,15 @@ def main(
         if dry_run:
             continue
 
-        n_used, n_skip = 0, 0
+        n_used, n_skip, n_fail = 0, 0, 0
         for it in terra_v05:
             tile = tile_of(it.id)
-            href = it.assets[prod.asset].href
+            href = pc.sign(it.assets[prod.asset].href)
             try:
-                da = rioxarray.open_rasterio(href).rio.clip_box(*ROI_BBOX, crs="EPSG:4326")
-            except NoDataInBounds:
-                n_skip += 1
+                da = read_clipped(href, ROI_BBOX)
+            except RuntimeError as exc:
+                n_fail += 1
+                console.print(f"  [yellow]skip {it.id}: {exc}[/yellow]")
                 continue
             arr = da.values[0]
             valid = valid_mask_for(prod.key, arr)
@@ -261,7 +313,7 @@ def main(
             if tile not in geo:
                 geo[tile] = (da.rio.crs, da.rio.transform())
             n_used += 1
-        console.print(f"  used {n_used}, skipped {n_skip}")
+        console.print(f"  used {n_used}, skipped {n_skip}, failed {n_fail}")
 
         done_years.add(year)
         _save_checkpoint(ckpt_path(out_dir, prod.var), acc, done_years)
@@ -271,7 +323,6 @@ def main(
         raise typer.Exit(code=0)
 
     # ---- Write per-tile min/max reference rasters ----
-    import rioxarray
     import xarray as xr
 
     written = []
