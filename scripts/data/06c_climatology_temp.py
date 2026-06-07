@@ -294,9 +294,14 @@ def _fold_month(raw_path: Path, acc: dict, lat_grid, year: int, month: int, np, 
         tmax = tmax.load()
         tmin = tmin.load()
         latname = "latitude" if "latitude" in tmax.coords else "lat"
+        lonname = "longitude" if "longitude" in tmax.coords else "lon"
         lats = tmax[latname].values
+        lons = tmax[lonname].values
         if lat_grid is None:
             lat_grid = lats
+        if "lats" not in acc:
+            acc["lats"] = lats
+            acc["lons"] = lons
         h, w = tmax.shape[-2], tmax.shape[-1]
         if "doy_sum" not in acc:
             acc["doy_sum"] = np.zeros((366, h, w), dtype="float64")
@@ -341,9 +346,25 @@ def _write_outputs(out_dir: Path, acc: dict, start_year, end_year, np, xr):
         console.print("[yellow]No data accumulated; nothing written.[/yellow]")
         return
     mean, std = windowed_doy_stats(acc["doy_sum"], acc["doy_sumsq"], acc["doy_count"])
+    nrows, ncols = mean.shape[1], mean.shape[2]
+    if "lats" in acc and "lons" in acc:
+        lats, lons = acc["lats"], acc["lons"]
+    else:
+        # Older checkpoints lack the captured grid; reconstruct from the ERA5-Land
+        # 0.1 grid starting at the requested NW corner (latitude descends, ECMWF
+        # convention). Verify orientation downstream (south/desert hotter).
+        north, west, _s, _e = DEFAULT_AREA
+        lats = north - np.arange(nrows) * 0.1
+        lons = west + np.arange(ncols) * 0.1
+    coords2d = {"lat": lats, "lon": lons}
+
     doy = np.arange(1, 367)
     for name, arr in (("mean", mean), ("std", std)):
-        da = xr.DataArray(arr.astype("float32"), dims=("doy", "lat", "lon"), coords={"doy": doy})
+        da = xr.DataArray(
+            arr.astype("float32"),
+            dims=("doy", "lat", "lon"),
+            coords={"doy": doy, **coords2d},
+        )
         dst = out_dir / f"tmax_doy_{name}.nc"
         da.to_dataset(name="tmax").to_netcdf(dst, engine="h5netcdf")
 
@@ -358,7 +379,7 @@ def _write_outputs(out_dir: Path, acc: dict, start_year, end_year, np, xr):
     import pandas as pd
 
     times = pd.to_datetime([f"{lbl // 100}-{lbl % 100:02d}-01" for lbl in labels])
-    da = xr.DataArray(pet, dims=("time", "lat", "lon"), coords={"time": times})
+    da = xr.DataArray(pet, dims=("time", "lat", "lon"), coords={"time": times, **coords2d})
     da.to_dataset(name="pet").to_netcdf(
         out_dir / f"pet_monthly_{start_year}_{end_year}.nc", engine="h5netcdf"
     )

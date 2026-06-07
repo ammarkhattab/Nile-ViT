@@ -192,3 +192,23 @@ class TestFoldMonth:
         assert np.isfinite(pet[0, 0])  # land pixel has PET
         assert pet[0, 0] > 0
         assert np.isnan(pet[0, 1])  # sea pixel masked to NaN, not 0
+
+    def test_write_outputs_attaches_latlon_coords(self, mod, tmp_path):
+        xr = pytest.importorskip("xarray")
+        pytest.importorskip("h5netcdf")
+        h, w = 3, 4
+        acc = {
+            "doy_sum": np.ones((366, h, w)),
+            "doy_sumsq": np.ones((366, h, w)),
+            "doy_count": np.ones((366, h, w)),
+            "pet_months": np.ones((2, h, w), dtype="float32"),
+            "pet_labels": np.array([199101, 199102]),
+        }
+        mod._write_outputs(tmp_path, acc, 1991, 1991, np, xr)
+        with xr.open_dataset(tmp_path / "tmax_doy_mean.nc") as ds:
+            assert "lat" in ds.coords and "lon" in ds.coords
+            assert ds.sizes["lat"] == h and ds.sizes["lon"] == w
+            # latitude descends from the N corner (ECMWF convention)
+            assert float(ds["lat"][0]) > float(ds["lat"][-1])
+        with xr.open_dataset(tmp_path / "pet_monthly_1991_1991.nc") as ds:
+            assert "lat" in ds.coords and "lon" in ds.coords
