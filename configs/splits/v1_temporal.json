@@ -1,0 +1,30 @@
+{
+  "version": "v1_temporal",
+  "kind": "temporal_holdout",
+  "description": "PRD section 4.5 temporal hold-out (R5): 2017-2022 train, 2023 test, 2024 OOD-time. Samples are assigned by their calendar year.",
+  "rule": "by_calendar_year",
+  "train_years": [
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022
+  ],
+  "test_years": [
+    2023
+  ],
+  "ood_time_years": [
+    2024
+  ],
+  "assignment": {
+    "2017": "train",
+    "2018": "train",
+    "2019": "train",
+    "2020": "train",
+    "2021": "train",
+    "2022": "train",
+    "2023": "test",
+    "2024": "ood_time"
+  }
+}
