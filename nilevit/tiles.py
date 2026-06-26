@@ -117,6 +117,64 @@ def label_date_for(tile_date: dt.date, label_dates: Sequence[dt.date]) -> dt.dat
 
 
 # --- geospatial resampler (design A: resample the ROI label onto the tile) -----
+def mgrs_to_epsg(mgrs_tile: str) -> int:
+    """EPSG code of the UTM CRS for an MGRS tile id (e.g. ``"T36RUU" -> 32636``).
+
+    MGRS latitude bands C..M are southern, N..X northern, so the band letter
+    selects the 327xx (south) vs 326xx (north) UTM family for the zone number.
+    """
+    tile = mgrs_tile.upper().removeprefix("T")
+    cut = 0
+    while cut < len(tile) and tile[cut].isdigit():
+        cut += 1
+    zone = int(tile[:cut])
+    band = tile[cut]
+    if not 1 <= zone <= 60:
+        raise ValueError(f"invalid UTM zone {zone} in MGRS tile {mgrs_tile!r}")
+    northern = band >= "N"
+    return (32600 if northern else 32700) + zone
+
+
+def tile_grid_template(
+    center_lon: float,
+    center_lat: float,
+    mgrs_tile: str,
+    *,
+    size: int = 224,
+    res: float = 30.0,
+) -> xr.DataArray:
+    """Empty destination grid for a tile, reconstructed from its centre point.
+
+    The 05b cube stores no per-tile transform, but tiles are a regular ``res``-m
+    north-up grid in the MGRS tile's UTM CRS, and ``center_lon/lat`` is the window
+    centroid. So the grid is the centre projected to UTM, expanded by
+    ``size/2 * res`` to the upper-left. Returns a CRS- and transform-aware
+    DataArray to pass as the ``tile_template`` of :func:`resample_label_to_tile`.
+    """
+    import numpy as np
+    import rioxarray  # noqa: F401  (registers the .rio accessor)
+    import xarray as xr
+    from affine import Affine
+    from pyproj import Transformer
+
+    epsg = mgrs_to_epsg(mgrs_tile)
+    transformer = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
+    center_x, center_y = transformer.transform(center_lon, center_lat)
+
+    half = (size / 2.0) * res
+    x_ul, y_ul = center_x - half, center_y + half
+    transform = Affine(res, 0.0, x_ul, 0.0, -res, y_ul)
+    xs = x_ul + (np.arange(size) + 0.5) * res
+    ys = y_ul - (np.arange(size) + 0.5) * res
+
+    template = xr.DataArray(
+        np.zeros((size, size), dtype="float32"),
+        coords={"y": ys, "x": xs},
+        dims=("y", "x"),
+    )
+    return template.rio.write_crs(epsg).rio.write_transform(transform)
+
+
 def resample_label_to_tile(
     roi_label: xr.DataArray,
     tile_template: xr.DataArray,

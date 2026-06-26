@@ -12,7 +12,9 @@ from nilevit.tiles import (
     class_weights_from_counts,
     label_date_for,
     label_histogram,
+    mgrs_to_epsg,
     resample_label_to_tile,
+    tile_grid_template,
     valid_fraction,
 )
 
@@ -107,3 +109,31 @@ def test_resample_label_to_tile_is_nearest_and_categorical() -> None:
     assert set(np.unique(values)).issubset({0, 1, 2, 3, 255})
     # All four original classes survive onto the finer grid.
     assert {0, 1, 2, 3}.issubset(set(np.unique(values)))
+
+
+# --- grid reconstruction -------------------------------------------------------
+def test_mgrs_to_epsg() -> None:
+    assert mgrs_to_epsg("T36RUU") == 32636  # northern band R, zone 36
+    assert mgrs_to_epsg("36RUU") == 32636  # leading T is optional
+    assert mgrs_to_epsg("34HBH") == 32734  # southern band H, zone 34
+    with pytest.raises(ValueError, match="zone"):
+        mgrs_to_epsg("T99XYZ")
+
+
+def test_tile_grid_template_geometry_and_roundtrip() -> None:
+    from pyproj import Transformer
+
+    lon, lat = 30.947267, 30.686391  # a real T36RUU r00c00 centre
+    template = tile_grid_template(lon, lat, "T36RUU", size=224, res=30.0)
+    assert template.shape == (224, 224)
+    assert template.rio.crs.to_epsg() == 32636
+    # 30 m pixels.
+    assert float(template.x[1] - template.x[0]) == pytest.approx(30.0)
+    assert float(template.y[0] - template.y[1]) == pytest.approx(30.0)
+    # The grid centre projects back to the input lon/lat (sub-metre round-trip).
+    center_x = float((template.x[111] + template.x[112]) / 2)
+    center_y = float((template.y[111] + template.y[112]) / 2)
+    back = Transformer.from_crs(32636, "EPSG:4326", always_xy=True)
+    blon, blat = back.transform(center_x, center_y)
+    assert blon == pytest.approx(lon, abs=1e-5)
+    assert blat == pytest.approx(lat, abs=1e-5)

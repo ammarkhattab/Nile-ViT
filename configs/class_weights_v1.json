@@ -1,0 +1,32 @@
+{
+  "source_zarr": "data\\interim\\tiles_T36RUU_2023.zarr",
+  "n_samples": 1806,
+  "n_dropped_out_of_roi": 414,
+  "n_kept": 1392,
+  "n_usable_tiles": 504,
+  "counts": {
+    "0": 654732,
+    "1": 11934528,
+    "2": 12589260,
+    "3": 0
+  },
+  "compound_prevalence": 0.0,
+  "class_weights_median_freq": [
+    18.228111654845033,
+    1.0,
+    0.9479928129214902,
+    0.0
+  ],
+  "class_weights_inverse": [
+    9.614055827422519,
+    0.527430158947216,
+    0.5,
+    0.0
+  ],
+  "placeholder_weights": [
+    0.1,
+    1.0,
+    1.0,
+    3.0
+  ]
+}
