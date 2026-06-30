@@ -1579,6 +1579,23 @@ wheels = [
 ]
 
 [[package]]
+name = "mgrs"
+version = "1.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8f/51/bcef7a556739c62ee89160adf0ddc3e09852628350b04a5718a140c8cb00/mgrs-1.5.4.tar.gz", hash = "sha256:41ba8f5bfbf8d15fb5d34d275cd8201fc9917ebb10fb82913831e95a31930ffa", size = 32432, upload-time = "2026-02-03T22:42:55.649Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/23/0738261d4e9788e82019ac1c7ba67fbf65f598d4d56d9bd799f8f610e4bb/mgrs-1.5.4-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:7663f1bfd845715d9a6cb943050d949a6eb3dbef003a1dff7e7b2e3df3196459", size = 58225, upload-time = "2026-02-03T22:41:42.293Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/20/912bc6862cda5e0a8799fc9fdfaa73f416d32f60880b729efca00bfb8f0d/mgrs-1.5.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:aaf9aae1cf2d61d3f10874f82f9dc45b0b0408cbb97d77284724038fc118499b", size = 57322, upload-time = "2026-02-03T22:41:43.471Z" },
+    { url = "https://files.pythonhosted.org/packages/57/2b/597d2a3cf2b377121af5bfdca81e1beff6dbaf0cd7f81acc13b5aff859ed/mgrs-1.5.4-cp311-cp311-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b770c4dae4eba1de633f25e2c90c164ce7b72ba9f19d585c087bd57201e904e6", size = 88743, upload-time = "2026-02-03T22:41:45.025Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/dd/6532d81b4507c408bd6e1fa679cb72a4f2733324e27d30cf0598c05ec331/mgrs-1.5.4-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0fe4810e4eb9a907eb60ea70320823577760651ebb5595b39ba06f27a2ec636b", size = 87975, upload-time = "2026-02-03T22:41:47.084Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/e0/51977648f032aab940381491bff40e382b61cecce484e02753560b2d451f/mgrs-1.5.4-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:c6b88ff93308f6e5c4543ede2aa9eb570ecae2d2ef6d6215bbe545b24223c85e", size = 86477, upload-time = "2026-02-03T22:41:48.77Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/49/943de6f73dc8e1daedf326a8968d1cf40abd1c852da768a995e0a8e77379/mgrs-1.5.4-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:4f253b5174e38df771b58fadc5b7eec512de06db102705262ec3157c7eeb3ca4", size = 87706, upload-time = "2026-02-03T22:41:50.476Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/85/35c2ce4e93fcf3cca6ee4b566cd8cf5214f91110b6f1d6cd14a274f3f5ba/mgrs-1.5.4-cp311-cp311-win32.whl", hash = "sha256:5573ed7dc29c3d947f43aa25dc3026b61f9df9292877bcd31b9b5633ba343593", size = 58044, upload-time = "2026-02-03T22:41:51.823Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/56/9ec7aea85ac4ae67a4ab66b4388d26b3f81ff6f825ef75a0b451b8f9b918/mgrs-1.5.4-cp311-cp311-win_amd64.whl", hash = "sha256:71de610e84f2d998c5216e414d4cc14722eafa177968d9bc72be00d9d87f188f", size = 60153, upload-time = "2026-02-03T22:41:52.953Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/ef/7e52e4c7b9a87a7d7f1fafa668b93ceeb943e4ebf565ed12d905670b9bd0/mgrs-1.5.4-cp311-cp311-win_arm64.whl", hash = "sha256:38f7f015805aa0c77f1bfdfdf98583d048bc4d12c71d5cea586dd6f38b641b61", size = 56558, upload-time = "2026-02-03T22:41:54.111Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1743,6 +1760,7 @@ dependencies = [
     { name = "geopandas" },
     { name = "h5netcdf" },
     { name = "matplotlib" },
+    { name = "mgrs" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "peft" },
@@ -1798,6 +1816,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'demo'", specifier = ">=0.25" },
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=6.29" },
     { name = "matplotlib", specifier = ">=3.9" },
+    { name = "mgrs", specifier = ">=1.5.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "nbstripout", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=1.26,<2.2" },

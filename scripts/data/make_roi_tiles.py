@@ -1,0 +1,49 @@
+# ruff: noqa: B008
+"""Generate configs/roi_tiles.json -- the canonical ROI + OOD MGRS tile coverage.
+
+Replaces the hand-typed (Delta-only) KNOWN_TILES in 01_download_hls.py with the
+complete tile set covering the §4.1 ROI (Nile Delta + Eastern Mediterranean) and
+the NW-Africa OOD region, enumerated from the MGRS grid. Deterministic and
+idempotent.
+
+Usage:
+    uv run python scripts/data/make_roi_tiles.py
+    uv run python scripts/data/make_roi_tiles.py --out configs/roi_tiles.json
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+from pathlib import Path
+
+import typer
+
+from nilevit.roi_tiles import enumerate_roi_tiles
+
+with contextlib.suppress(ImportError):
+    import nilevit  # noqa: F401
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+
+@app.command()
+def main(
+    out: Path = typer.Option(Path("configs/roi_tiles.json"), help="Output tile-coverage JSON."),
+    step_deg: float = typer.Option(0.05, help="Sampling step (degrees)."),
+    buffer_deg: float = typer.Option(0.1, help="Bbox expansion for edge tiles."),
+) -> None:
+    """Enumerate ROI + OOD MGRS tiles and write the coverage JSON."""
+    doc = enumerate_roi_tiles(step_deg=step_deg, buffer_deg=buffer_deg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+    typer.echo(f"wrote {out}")
+    typer.echo(f"  ROI tiles: {doc['n_roi_tiles']}  (was 5 hand-typed, Delta-only)")
+    typer.echo(f"  OOD tiles: {doc['n_ood_tiles']}  (NW-Africa, for M9 OOD eval)")
+    sample = list(doc["roi_tiles"])[:8]
+    typer.echo(f"  e.g. {sample} ...")
+
+
+if __name__ == "__main__":
+    app()
