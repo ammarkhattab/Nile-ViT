@@ -11,6 +11,7 @@ from nilevit.roi_tiles import (
     mgrs_tiles_in_bbox,
     tile_bbox,
     tile_for_point,
+    tiles_with_land,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -55,3 +56,27 @@ def test_enumerate_roi_covers_delta_and_emed_and_separates_ood() -> None:
     assert set(roi).isdisjoint(set(ood))
     # The old hand list's out-of-ROI tile is correctly absent.
     assert "T35RPN" not in roi
+
+
+def test_tiles_with_land_prunes_sea(tmp_path) -> None:
+    import numpy as np
+    import rioxarray  # noqa: F401
+    import xarray as xr
+
+    # Label raster: west half land (class 0), east half sea (nodata 255).
+    lon = np.linspace(30.0, 32.0, 41)
+    lat = np.linspace(30.0, 31.0, 21)
+    grid = np.full((len(lat), len(lon)), 255, dtype="uint8")
+    grid[:, lon < 31.0] = 0  # land on the western side
+    da = xr.DataArray(grid, coords={"y": lat, "x": lon}, dims=("y", "x"))
+    da = da.rio.write_crs("EPSG:4326")
+    raster = tmp_path / "label.tif"
+    da.rio.to_raster(raster)
+
+    bboxes = {
+        "T_LAND": (30.2, 30.2, 30.8, 30.8),  # over the land half
+        "T_SEA": (31.2, 30.2, 31.8, 30.8),  # over the sea half
+        "T_OUT": (40.0, 30.2, 41.0, 30.8),  # outside the raster entirely
+    }
+    land = tiles_with_land(bboxes, str(raster))
+    assert land == ["T_LAND"]

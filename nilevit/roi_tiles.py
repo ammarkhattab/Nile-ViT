@@ -121,3 +121,36 @@ def enumerate_roi_tiles(
         "roi_tiles": roi,
         "ood_tiles": ood,
     }
+
+
+def tiles_with_land(
+    tile_bboxes: dict[str, Sequence[float]],
+    label_raster_path: str,
+    *,
+    nodata: int = 255,
+) -> list[str]:
+    """Tiles whose bbox overlaps any valid (non-``nodata``) pixel of an M3 label raster.
+
+    The label raster's validity mask (sea / no-data = 255) is the project's own
+    land definition, so a tile with no valid pixels yields no useful compound
+    labels and need not be downloaded. Order-agnostic coordinate masking (no
+    reliance on ascending/descending lat). Lazy rioxarray import.
+    """
+    import numpy as np
+    import rioxarray
+
+    raster = rioxarray.open_rasterio(label_raster_path).squeeze()
+    xs = np.asarray(raster["x"].values)
+    ys = np.asarray(raster["y"].values)
+    values = np.asarray(raster.values)
+
+    land: list[str] = []
+    for tile, (west, south, east, north) in tile_bboxes.items():
+        x_in = (xs >= west) & (xs <= east)
+        y_in = (ys >= south) & (ys <= north)
+        if not x_in.any() or not y_in.any():
+            continue
+        window = values[np.ix_(y_in, x_in)]
+        if (window != nodata).any():
+            land.append(tile)
+    return sorted(land)
