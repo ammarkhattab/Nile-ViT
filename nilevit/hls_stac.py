@@ -120,6 +120,29 @@ def search_hls_items(
     return found
 
 
+def hrefs_by_date(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    """Group streamable items into ``{iso_date: {"sensor", "item_id", "hrefs"}}``.
+
+    One entry per date; the earlier-sorted item wins when both S30 and L30 cover a
+    date (callers pass date-sorted items). Mirrors 05b's one-scene-per-date disk
+    behaviour so the STAC source is a drop-in for the tiler.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for it in items:
+        hrefs = item_band_hrefs(it)
+        if hrefs is None:
+            continue
+        iso = date_from_item(it).isoformat()
+        if iso in out:
+            continue
+        out[iso] = {
+            "sensor": sensor_from_id(it.id),
+            "item_id": it.id,
+            "hrefs": hrefs,
+        }
+    return out
+
+
 def manifest_rows_for_items(items: Iterable[Any]) -> Iterator[dict[str, Any]]:
     """Yield ``{tile, date, sensor, item_id, cloud, hrefs}`` for streamable items."""
     for it in items:

@@ -55,6 +55,15 @@ from rich.table import Table
 with contextlib.suppress(ImportError):
     import nilevit  # noqa: F401
 
+# Band constants + STAC helpers live in nilevit/ (shared with the streaming path).
+from nilevit.hls_bands import (
+    BAND_NAMES,
+    FMASK_CLOUD_BITS,
+    FMASK_FILL,
+    HLS_BAND_MAP,
+    HLS_FILL,
+)
+
 app = typer.Typer(
     add_completion=False,
     help="Tile HLS imagery into 224x224 patches -> Zarr + GeoParquet (Script 05b).",
@@ -63,31 +72,6 @@ console = Console()
 
 
 PATCH = 224
-BAND_NAMES = ["blue", "green", "red", "nir_narrow", "swir1", "swir2"]
-
-HLS_BAND_MAP: dict[str, dict[str, str]] = {
-    "S30": {
-        "blue": "B02",
-        "green": "B03",
-        "red": "B04",
-        "nir_narrow": "B8A",
-        "swir1": "B11",
-        "swir2": "B12",
-    },
-    "L30": {
-        "blue": "B02",
-        "green": "B03",
-        "red": "B04",
-        "nir_narrow": "B05",
-        "swir1": "B06",
-        "swir2": "B07",
-    },
-}
-
-HLS_FILL = -9999  # HLS scaled-reflectance fill value
-FMASK_FILL = 255  # HLS Fmask no-observation value
-# Fmask cloud-related bits: bit1 cloud (2), bit2 adjacent (4), bit3 shadow (8).
-FMASK_CLOUD_BITS = 0b1110  # = 14
 
 
 def is_colab() -> bool:
@@ -201,6 +185,60 @@ def band_path(b04_path: Path, band_code: str) -> Path:
     return b04_path.with_name(b04_path.name.replace(".B04.", f".{band_code}."))
 
 
+# A "scene" normalises either source to: (sensor, {band_name: source_str},
+# fmask_source_or_None). A source string is a local path (disk) or a signed COG
+# href (stac); rioxarray.open_rasterio reads either identically.
+Scene = tuple[str, dict[str, str], "str | None"]
+
+
+def _disk_scenes(hls_dir: Path) -> dict[date, Scene]:
+    """Enumerate on-disk HLS dates -> band file paths (Fmask optional)."""
+    scenes: dict[date, Scene] = {}
+    for p in sorted(hls_dir.glob("*.B04.tif")):
+        d, sensor = hls_date_from_name(p.name), hls_sensor_from_name(p.name)
+        if not (d and sensor):
+            continue
+        codes = HLS_BAND_MAP[sensor]
+        srcs = {n: str(band_path(p, codes[n])) for n in BAND_NAMES}
+        fmask_p = band_path(p, "Fmask")
+        scenes[d] = (sensor, srcs, str(fmask_p) if fmask_p.exists() else None)
+    return scenes
+
+
+def _stac_scenes(
+    tile: str, year: int, want_date: date | None, cloud_max: float
+) -> dict[date, Scene]:
+    """Search PC STAC -> per-date signed band hrefs (§10.3 streaming; no download)."""
+    from nilevit.hls_stac import hrefs_by_date, open_catalog, search_hls_items
+    from nilevit.roi_tiles import tile_bbox
+
+    if want_date is not None:
+        date_range = f"{want_date.isoformat()}/{want_date.isoformat()}"
+    else:
+        date_range = f"{year:04d}-01-01/{year:04d}-12-31"
+    catalog = open_catalog()
+    items = search_hls_items(catalog, tile, tile_bbox(tile), date_range, cloud_max=cloud_max)
+    scenes: dict[date, Scene] = {}
+    for iso, sc in hrefs_by_date(items).items():
+        srcs = {n: sc["hrefs"][n] for n in BAND_NAMES}
+        scenes[date.fromisoformat(iso)] = (sc["sensor"], srcs, sc["hrefs"]["Fmask"])
+    return scenes
+
+
+def _resolve_scenes(
+    source: str,
+    hls_dir: Path,
+    tile: str,
+    year: int,
+    want_date: date | None,
+    cloud_max: float,
+) -> dict[date, Scene]:
+    """Dispatch to the disk or STAC scene resolver."""
+    if source == "disk":
+        return _disk_scenes(hls_dir)
+    return _stac_scenes(tile, year, want_date, cloud_max)
+
+
 @app.command()
 def main(
     tile: str = typer.Option("T36RUU", "--tile", "-t", help="HLS MGRS tile id."),
@@ -219,11 +257,23 @@ def main(
     overwrite: bool = typer.Option(
         False, "--overwrite", help="Recreate the Zarr/Parquet instead of appending."
     ),
+    source: str = typer.Option(
+        "disk",
+        "--source",
+        help="Band source: 'disk' (downloaded HLS) or 'stac' (PC streaming, §10.3).",
+    ),
+    cloud_max: float = typer.Option(
+        50.0, "--cloud-max", help="STAC only: max eo:cloud_cover percent [0..100]."
+    ),
 ) -> None:
     """Tile HLS imagery into 224x224 patches for one date or all dates."""
+    if source not in ("disk", "stac"):
+        console.print(f"[red]ERROR[/red] --source must be 'disk' or 'stac', got {source!r}.")
+        raise typer.Exit(code=2)
+
     root = default_data_root()
     hls_dir = root / "raw" / "hls" / tile / str(year)
-    if not hls_dir.exists():
+    if source == "disk" and not hls_dir.exists():
         console.print(f"[red]ERROR[/red] HLS dir not found: {hls_dir}")
         raise typer.Exit(code=1)
 
@@ -236,16 +286,23 @@ def main(
             console.print(f"[red]ERROR[/red] --date must be YYYY-MM-DD: {exc}")
             raise typer.Exit(code=2) from exc
 
-    all_b04 = sorted(hls_dir.glob("*.B04.tif"))
-    avail = sorted({d for p in all_b04 if (d := hls_date_from_name(p.name))})
+    # scenes: {date: (sensor, {band_name: source_str}, fmask_source_or_None)}.
+    # Both sources normalise to this so the patch loop is source-agnostic; a source
+    # string is a local path (disk) or a signed COG href (stac) - rioxarray reads
+    # either identically.
+    scenes = _resolve_scenes(source, hls_dir, tile, year, want_date, cloud_max)
+    avail = sorted(scenes)
     if all_dates:
         dates = avail
     elif want_date is not None:
-        dates = [want_date]
+        dates = [want_date] if want_date in scenes else []
     elif avail:
         dates = [avail[0]]
     else:
-        console.print(f"[red]ERROR[/red] no HLS B04 files in {hls_dir}")
+        dates = []
+    if not dates:
+        where = str(hls_dir) if source == "disk" else f"PC STAC ({tile})"
+        console.print(f"[red]ERROR[/red] no HLS scenes for {tile}/{year} from {where}.")
         raise typer.Exit(code=1)
 
     if output_dir is None:
@@ -258,6 +315,7 @@ def main(
     plan.add_column(style="dim")
     plan.add_column(style="bold")
     plan.add_row("Tile / year", f"{tile} / {year}")
+    plan.add_row("Source", source + (f" (cloud<{cloud_max})" if source == "stac" else ""))
     plan.add_row("Dates", f"{len(dates)} ({dates[0]} .. {dates[-1]})")
     plan.add_row("Patch size", f"{PATCH}x{PATCH}")
     plan.add_row("Bands", ", ".join(BAND_NAMES))
@@ -296,15 +354,14 @@ def main(
 
     total_written, total_dropped, total_dup = 0, 0, 0
     for d in dates:
-        ref = find_hls_b04(hls_dir, d)
-        if ref is None:
-            console.print(f"[yellow]SKIP {d}: no B04 file[/yellow]")
+        scene = scenes.get(d)
+        if scene is None:
+            console.print(f"[yellow]SKIP {d}: no scene[/yellow]")
             continue
-        b04_path, _, sensor = ref
-        band_codes = HLS_BAND_MAP[sensor]
+        sensor, band_sources, fmask_source = scene
 
-        # Load the 6 bands + Fmask onto the native HLS grid.
-        red_da = rioxarray.open_rasterio(b04_path)  # for grid + valid mask
+        # Load the 6 bands + Fmask onto the native HLS grid (red = grid reference).
+        red_da = rioxarray.open_rasterio(band_sources["red"])
         h, w = red_da.shape[-2:]
         grid = patch_grid(h, w)
 
@@ -319,12 +376,12 @@ def main(
         console.print(f"[bold]{d}[/bold] sensor {sensor}: loading 6 bands + Fmask...")
         band_arrs = []
         for name in BAND_NAMES:
-            bp = band_path(b04_path, band_codes[name])
-            if not bp.exists():
-                console.print(f"  [red]missing band {band_codes[name]} ({bp.name})[/red]")
+            src = band_sources[name]
+            if source == "disk" and not Path(src).exists():
+                console.print(f"  [red]missing band {name} ({Path(src).name})[/red]")
                 band_arrs = []
                 break
-            da = rioxarray.open_rasterio(bp)
+            da = rioxarray.open_rasterio(src)
             band_arrs.append(da.values[0])  # (H, W)
         if not band_arrs:
             red_da.close()
@@ -332,10 +389,9 @@ def main(
             continue
 
         stack = np.stack(band_arrs, axis=0).astype(np.uint16)  # (6, H, W)
-        fmask_path = band_path(b04_path, "Fmask")
         fmask = (
-            rioxarray.open_rasterio(fmask_path).values[0]
-            if fmask_path.exists()
+            rioxarray.open_rasterio(fmask_source).values[0]
+            if fmask_source is not None
             else np.zeros((h, w), dtype=np.uint8)
         )
         red = red_da.values[0]

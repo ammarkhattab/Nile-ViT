@@ -12,6 +12,7 @@ from datetime import date, datetime
 from nilevit.hls_stac import (
     date_from_item,
     filter_items_for_tile,
+    hrefs_by_date,
     item_band_hrefs,
     manifest_rows_for_items,
     sensor_from_id,
@@ -119,6 +120,27 @@ def test_canonical_band_map_matches_expected() -> None:
     assert HLS_BAND_MAP["S30"] == S30_MAP
     assert HLS_BAND_MAP["L30"] == L30_MAP
 
+
+def test_hrefs_by_date_one_scene_per_date() -> None:
+    # Two S30 scenes on distinct dates + a duplicate date -> first wins.
+    dup = _s30(day=1)
+    dup.id = "HLS.L30.T36RUU.2023213T090000.v2.0"  # same date, different sensor/id
+    dup.assets = {c: _Asset(f"https://blob/dup/{c}.tif") for c in L30_CODES}
+    grouped = hrefs_by_date([_s30(day=1), dup, _s30(day=6)])
+    assert set(grouped) == {"2023-08-01", "2023-08-06"}
+    assert grouped["2023-08-01"]["sensor"] == "S30"  # first item kept
+    assert set(grouped["2023-08-01"]["hrefs"]) == {
+        "blue",
+        "green",
+        "red",
+        "nir_narrow",
+        "swir1",
+        "swir2",
+        "Fmask",
+    }
+
+
+def test_manifest_rows() -> None:
     rows = list(manifest_rows_for_items([_s30(day=1), _s30(day=6)]))
     assert len(rows) == 2
     r = rows[0]
