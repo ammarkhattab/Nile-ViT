@@ -63,6 +63,7 @@ from nilevit.hls_bands import (
     HLS_BAND_MAP,
     HLS_FILL,
 )
+from nilevit.select import DEFAULT_KEEP_PROB, decide_patch
 
 app = typer.Typer(
     add_completion=False,
@@ -206,10 +207,23 @@ def _disk_scenes(hls_dir: Path) -> dict[date, Scene]:
 
 
 def _stac_scenes(
-    tile: str, year: int, want_date: date | None, cloud_max: float
+    tile: str,
+    year: int,
+    want_date: date | None,
+    cloud_max: float,
+    composite_dates: list[str] | None = None,
 ) -> dict[date, Scene]:
-    """Search PC STAC -> per-date signed band hrefs (§10.3 streaming; no download)."""
-    from nilevit.hls_stac import hrefs_by_date, open_catalog, search_hls_items
+    """Search PC STAC -> per-date signed band hrefs (§10.3 streaming; no download).
+
+    When ``composite_dates`` is given, applies the D7 temporal rule: one least-cloudy
+    scene per MODIS-composite window instead of every acquisition.
+    """
+    from nilevit.hls_stac import (
+        hrefs_by_date,
+        one_scene_per_window,
+        open_catalog,
+        search_hls_items,
+    )
     from nilevit.roi_tiles import tile_bbox
 
     if want_date is not None:
@@ -218,8 +232,11 @@ def _stac_scenes(
         date_range = f"{year:04d}-01-01/{year:04d}-12-31"
     catalog = open_catalog()
     items = search_hls_items(catalog, tile, tile_bbox(tile), date_range, cloud_max=cloud_max)
+    grouped = (
+        one_scene_per_window(items, composite_dates) if composite_dates else hrefs_by_date(items)
+    )
     scenes: dict[date, Scene] = {}
-    for iso, sc in hrefs_by_date(items).items():
+    for iso, sc in grouped.items():
         srcs = {n: sc["hrefs"][n] for n in BAND_NAMES}
         scenes[date.fromisoformat(iso)] = (sc["sensor"], srcs, sc["hrefs"]["Fmask"])
     return scenes
@@ -232,11 +249,12 @@ def _resolve_scenes(
     year: int,
     want_date: date | None,
     cloud_max: float,
+    composite_dates: list[str] | None = None,
 ) -> dict[date, Scene]:
     """Dispatch to the disk or STAC scene resolver."""
     if source == "disk":
         return _disk_scenes(hls_dir)
-    return _stac_scenes(tile, year, want_date, cloud_max)
+    return _stac_scenes(tile, year, want_date, cloud_max, composite_dates)
 
 
 @app.command()
@@ -265,6 +283,24 @@ def main(
     cloud_max: float = typer.Option(
         50.0, "--cloud-max", help="STAC only: max eo:cloud_cover percent [0..100]."
     ),
+    labels_dir: Path | None = typer.Option(
+        None,
+        "--labels-dir",
+        help="Enable D7 selection: dir of M3 label_*.tif. One scene per composite "
+        "window + per-class patch keep. When omitted, tiles everything (unchanged).",
+    ),
+    keep_none: float = typer.Option(
+        DEFAULT_KEEP_PROB[0], "--keep-none", help="Keep frac for class-0 patches."
+    ),
+    keep_drought: float = typer.Option(
+        DEFAULT_KEEP_PROB[1], "--keep-drought", help="Keep frac for drought patches."
+    ),
+    keep_heat: float = typer.Option(
+        DEFAULT_KEEP_PROB[2], "--keep-heat", help="Keep frac for heat patches."
+    ),
+    keep_compound: float = typer.Option(
+        DEFAULT_KEEP_PROB[3], "--keep-compound", help="Keep frac for compound patches."
+    ),
 ) -> None:
     """Tile HLS imagery into 224x224 patches for one date or all dates."""
     if source not in ("disk", "stac"):
@@ -286,11 +322,30 @@ def main(
             console.print(f"[red]ERROR[/red] --date must be YYYY-MM-DD: {exc}")
             raise typer.Exit(code=2) from exc
 
+    # ---- D7 selection setup (opt-in via --labels-dir) ----
+    select = labels_dir is not None
+    keep_prob = {0: keep_none, 1: keep_drought, 2: keep_heat, 3: keep_compound}
+    composite_dates: list[str] | None = None
+    label_dates: list[str] = []
+    if select:
+        if not labels_dir.exists():
+            console.print(f"[red]ERROR[/red] labels dir not found: {labels_dir}")
+            raise typer.Exit(code=1)
+        label_dates = sorted(
+            m.group(1)
+            for p in labels_dir.glob("label_*.tif")
+            if (m := re.search(r"(\d{4}-\d{2}-\d{2})", p.name))
+        )
+        if not label_dates:
+            console.print(f"[red]ERROR[/red] no label_*.tif in {labels_dir}")
+            raise typer.Exit(code=1)
+        composite_dates = label_dates  # temporal: one scene per composite window
+
     # scenes: {date: (sensor, {band_name: source_str}, fmask_source_or_None)}.
     # Both sources normalise to this so the patch loop is source-agnostic; a source
     # string is a local path (disk) or a signed COG href (stac) - rioxarray reads
     # either identically.
-    scenes = _resolve_scenes(source, hls_dir, tile, year, want_date, cloud_max)
+    scenes = _resolve_scenes(source, hls_dir, tile, year, want_date, cloud_max, composite_dates)
     avail = sorted(scenes)
     if all_dates:
         dates = avail
@@ -323,6 +378,12 @@ def main(
     plan.add_row("Zarr out", str(zarr_path))
     plan.add_row("Parquet out", str(parquet_path))
     plan.add_row("Mode", "dry-run" if dry_run else "write")
+    if select:
+        plan.add_row(
+            "Selection",
+            f"D7 on  none/drought/heat/compound="
+            f"{keep_none}/{keep_drought}/{keep_heat}/{keep_compound}",
+        )
     console.print(plan)
     console.print()
 
@@ -353,12 +414,27 @@ def main(
         console.print(f"[dim]{len(known_ids)} sample(s) already indexed; skipping those.[/dim]")
 
     total_written, total_dropped, total_dup = 0, 0, 0
+    total_deselected = 0
+    label_cache: dict[str, object] = {}
+    label_date_objs = [date.fromisoformat(x) for x in label_dates]
+
+    def _active_label(d: date):
+        """Load (cached) the M3 label raster active at date d (latest composite <= d)."""
+        from nilevit.tiles import label_date_for
+
+        active = label_date_for(d, label_date_objs).isoformat()
+        if active not in label_cache:
+            path = labels_dir / f"label_{active}.tif"
+            label_cache[active] = rioxarray.open_rasterio(path).squeeze() if path.exists() else None
+        return label_cache[active]
+
     for d in dates:
         scene = scenes.get(d)
         if scene is None:
             console.print(f"[yellow]SKIP {d}: no scene[/yellow]")
             continue
         sensor, band_sources, fmask_source = scene
+        label_da = _active_label(d) if select else None
 
         # Load the 6 bands + Fmask onto the native HLS grid (red = grid reference).
         red_da = rioxarray.open_rasterio(band_sources["red"])
@@ -415,6 +491,12 @@ def main(
             if sid in known_ids:
                 total_dup += 1
                 continue
+            # D7 spatial selection: keep by per-class rate against the active label.
+            if select and label_da is not None:
+                _cls, keep = decide_patch(sid, (lon, lat, lon, lat), label_da, keep_prob=keep_prob)
+                if not keep:
+                    total_deselected += 1
+                    continue
             known_ids.add(sid)
             images.append(stack[:, sl[0], sl[1]])
             rows.append(
@@ -477,7 +559,8 @@ def main(
 
     console.print(
         f"[green]Done: {total_written} written, {total_dropped} dropped "
-        f"(low valid), {total_dup} skipped (dup).[/green]"
+        f"(low valid), {total_dup} skipped (dup)"
+        + (f", {total_deselected} deselected (D7).[/green]" if select else ".[/green]")
     )
 
     # ---- Verify ----

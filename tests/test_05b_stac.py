@@ -51,6 +51,15 @@ def test_disk_scenes_fmask_optional(tmp_path) -> None:
 def test_resolve_scenes_dispatches_to_stac(monkeypatch, tmp_path) -> None:
     m = _load_05b()
     sentinel = {date(2023, 8, 1): ("S30", {"red": "https://x/B04.tif"}, "https://x/F.tif")}
-    monkeypatch.setattr(m, "_stac_scenes", lambda *a, **k: sentinel)
-    out = m._resolve_scenes("stac", tmp_path, "T36RUU", 2023, None, 50.0)
+    captured = {}
+
+    def fake_stac(tile, year, want_date, cloud_max, composite_dates=None):
+        captured["composite_dates"] = composite_dates
+        return sentinel
+
+    monkeypatch.setattr(m, "_stac_scenes", fake_stac)
+    out = m._resolve_scenes(
+        "stac", tmp_path, "T36RUU", 2023, None, 50.0, ["2023-08-13", "2023-08-29"]
+    )
     assert out is sentinel
+    assert captured["composite_dates"] == ["2023-08-13", "2023-08-29"]

@@ -15,6 +15,7 @@ from nilevit.hls_stac import (
     hrefs_by_date,
     item_band_hrefs,
     manifest_rows_for_items,
+    one_scene_per_window,
     sensor_from_id,
     tile_from_id,
 )
@@ -138,6 +139,23 @@ def test_hrefs_by_date_one_scene_per_date() -> None:
         "swir2",
         "Fmask",
     }
+
+
+def test_one_scene_per_window_picks_least_cloudy() -> None:
+    # Window 2023-08-13 .. +16d contains days 13 (cloud 40) and 15 (cloud 5).
+    def item(day, cloud):
+        it = _s30(day=day)
+        it.properties["eo:cloud_cover"] = cloud
+        return it
+
+    items = [item(13, 40.0), item(15, 5.0), item(30, 2.0)]  # day30 is next window
+    chosen = one_scene_per_window(items, ["2023-08-13", "2023-08-29"], window_days=16)
+    # Window 1 -> day 15 (cloud 5 beats 40); window 2 -> day 30.
+    assert "2023-08-15" in chosen
+    assert chosen["2023-08-15"]["cloud"] == 5.0
+    assert chosen["2023-08-15"]["window"] == "2023-08-13"
+    assert "2023-08-30" in chosen
+    assert "2023-08-13" not in chosen  # the cloudier day-13 scene was dropped
 
 
 def test_manifest_rows() -> None:

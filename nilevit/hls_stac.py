@@ -18,7 +18,7 @@ pure logic is offline-testable.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from nilevit.hls_bands import HLS_BAND_MAP
@@ -139,6 +139,48 @@ def hrefs_by_date(items: Iterable[Any]) -> dict[str, dict[str, Any]]:
             "sensor": sensor_from_id(it.id),
             "item_id": it.id,
             "hrefs": hrefs,
+        }
+    return out
+
+
+def one_scene_per_window(
+    items: Iterable[Any],
+    composite_dates: Sequence[str],
+    *,
+    window_days: int = 16,
+) -> dict[str, dict[str, Any]]:
+    """Pick the least-cloudy HLS scene per MODIS-composite window (D7 temporal rule).
+
+    Each composite date ``d`` defines the window ``[d, d + window_days)``. Among all
+    items falling in a window, the one with the lowest ``eo:cloud_cover`` wins - this
+    realises the sampling model's "one central date per composite window" and stops
+    the ~2-3 day HLS revisit from multiplying samples. Returns
+    ``{acquisition_date_iso: {sensor, item_id, hrefs, window, cloud}}`` for the
+    chosen scenes only.
+    """
+    windows = sorted(date.fromisoformat(d) for d in composite_dates)
+    best: dict[date, tuple[float, Any]] = {}
+    for it in items:
+        acq = date_from_item(it)
+        cloud = it.properties.get("eo:cloud_cover")
+        cloud = 100.0 if cloud is None else float(cloud)
+        window = next((w for w in windows if w <= acq < w + timedelta(days=window_days)), None)
+        if window is None:
+            continue
+        if window not in best or cloud < best[window][0]:
+            best[window] = (cloud, it)
+
+    out: dict[str, dict[str, Any]] = {}
+    for window, (cloud, it) in best.items():
+        hrefs = item_band_hrefs(it)
+        if hrefs is None:
+            continue
+        out[date_from_item(it).isoformat()] = {
+            "sensor": sensor_from_id(it.id),
+            "item_id": it.id,
+            "hrefs": hrefs,
+            "window": window.isoformat(),
+            "cloud": cloud,
         }
     return out
 
