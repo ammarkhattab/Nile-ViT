@@ -1,27 +1,27 @@
 {
-  "source_zarr": "data\\interim\\tiles_T36RUU_2023.zarr",
-  "n_samples": 1806,
-  "n_dropped_out_of_roi": 414,
-  "n_kept": 1392,
-  "n_usable_tiles": 504,
+  "source_zarr": "data\\interim\\tiles_T36SXA_2023.zarr",
+  "n_samples": 65,
+  "n_dropped_out_of_roi": 0,
+  "n_kept": 65,
+  "n_usable_tiles": 18,
   "counts": {
-    "0": 654732,
-    "1": 11934528,
-    "2": 12589260,
-    "3": 0
+    "0": 152407,
+    "1": 25691,
+    "2": 424870,
+    "3": 247230
   },
-  "compound_prevalence": 0.0,
+  "compound_prevalence": 0.2907910863116592,
   "class_weights_median_freq": [
-    18.228111654845033,
-    1.0,
-    0.9479928129214902,
-    0.0
+    1.311084792693249,
+    7.777762640613443,
+    0.47030503448113536,
+    0.8082291793067183
   ],
   "class_weights_inverse": [
-    9.614055827422519,
-    0.527430158947216,
-    0.5,
-    0.0
+    1.3946177012866863,
+    8.273305826943288,
+    0.5002694941982253,
+    0.859723739028435
   ],
   "placeholder_weights": [
     0.1,
