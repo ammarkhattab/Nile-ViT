@@ -1,32 +1,24 @@
 {
-  "source_zarr": "data\\interim\\tiles_T36SXA_2023.zarr",
-  "n_samples": 65,
-  "n_dropped_out_of_roi": 0,
-  "n_kept": 65,
-  "n_usable_tiles": 18,
+  "scope": "global over 71 packaged tiles (2023)",
+  "n_tiles": 71,
   "counts": {
-    "0": 152407,
-    "1": 25691,
-    "2": 424870,
-    "3": 247230
+    "0": 29686049,
+    "1": 41694856,
+    "2": 43420559,
+    "3": 16914846
   },
-  "compound_prevalence": 0.2907910863116592,
+  "selected_sample_compound_fraction": 0.12841876605866046,
+  "note": "selected_sample_compound_fraction is a DATASET statistic (D7 enrichment), NOT the \u00a74.4 gate - run scripts/data/check_gate.py for that.",
   "class_weights_median_freq": [
-    1.311084792693249,
-    7.777762640613443,
-    0.47030503448113536,
-    0.8082291793067183
+    1.2022634773660854,
+    0.8559917439216004,
+    0.8219712809316895,
+    2.110007534209889
   ],
   "class_weights_inverse": [
-    1.3946177012866863,
-    8.273305826943288,
-    0.5002694941982253,
-    0.859723739028435
-  ],
-  "placeholder_weights": [
-    0.1,
-    1.0,
-    1.0,
-    3.0
+    1.1092441941330757,
+    0.7897635502086876,
+    0.7583752549109283,
+    1.946755974012415
   ]
 }
