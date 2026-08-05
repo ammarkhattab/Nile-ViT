@@ -156,7 +156,7 @@ def aggregate_meteo_norm(interim: Path, year: int, out: Path) -> dict:
         if not store.exists():
             continue
         index = gpd.read_parquet(parquet).set_index("sample_id")
-        dataset = xr.open_zarr(store)
+        dataset = xr.open_zarr(store, consolidated=False)
         order = [str(s) for s in dataset["sample"].values]
         values = dataset["meteo"].values
         for i, sample_id in enumerate(order):
