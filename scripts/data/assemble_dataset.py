@@ -83,9 +83,7 @@ def main(
     #   `temporal_split` - temporal holdout (R5): 2017-2022 train, 2023 test,
     #                      2024 ood_time. Composing them into one column would
     #                      destroy the spatial split, so they stay orthogonal.
-    gdf["temporal_split"] = [
-        temporal_split_for_date(dt.date.fromisoformat(str(date))) for date in gdf["date"]
-    ]
+    gdf["temporal_split"] = [temporal_split_for_date(str(date)) for date in gdf["date"]]
 
     # Buffer/none tiles are §4.5 leakage spacing, not dataset members -> excluded.
     n_total = len(gdf)
