@@ -32,7 +32,7 @@ from nilevit.dataset import (
     temporal_leak_violations,
     validate_tilesamples,
 )
-from nilevit.splits import BUFFER_KM
+from nilevit.splits import BUFFER_KM, temporal_split_for_date
 
 with contextlib.suppress(ImportError):
     import nilevit  # noqa: F401
@@ -76,6 +76,17 @@ def main(
         for mgrs, date in zip(gdf["mgrs_tile"], gdf["date"], strict=True)
     ]
 
+    # §4.5 defines TWO independent protocols; keep them in separate columns.
+    #   `split`          - spatial-block CV (train/val/test; `ood` = the NW-Africa
+    #                      OOD region, which is only populated once those tiles are
+    #                      tiled - see R6).
+    #   `temporal_split` - temporal holdout (R5): 2017-2022 train, 2023 test,
+    #                      2024 ood_time. Composing them into one column would
+    #                      destroy the spatial split, so they stay orthogonal.
+    gdf["temporal_split"] = [
+        temporal_split_for_date(dt.date.fromisoformat(str(date))) for date in gdf["date"]
+    ]
+
     # Buffer/none tiles are §4.5 leakage spacing, not dataset members -> excluded.
     n_total = len(gdf)
     gdf, excluded_counts = filter_members(gdf)
@@ -84,6 +95,7 @@ def main(
     spatial = spatial_leak_violations(gdf, buffer_km=buffer_km)
     temporal = temporal_leak_violations(gdf)
     counts = split_region_year_counts(gdf)
+    temporal_counts = {str(k): int(v) for k, v in gdf["temporal_split"].value_counts().items()}
 
     out.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_parquet(out)
@@ -96,6 +108,7 @@ def main(
         "n_excluded": int(sum(excluded_counts.values())),
         "excluded_counts": excluded_counts,
         "counts": counts,
+        "temporal_split_counts": temporal_counts,
         "acceptance": {
             "schema_valid": not schema_errors,
             "spatial_leak_free": not spatial,
@@ -120,6 +133,7 @@ def main(
     typer.echo(f"  split:  {counts['split']}")
     typer.echo(f"  region: {counts['region']}")
     typer.echo(f"  year:   {counts['year']}")
+    typer.echo(f"  temporal_split (R5): {temporal_counts}")
     typer.echo(
         "  acceptance: "
         f"schema={'PASS' if not schema_errors else f'FAIL ({len(schema_errors)})'}, "

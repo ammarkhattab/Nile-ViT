@@ -1,7 +1,7 @@
 {
-  "scope": "global over 1 packaged tiles (2019)",
+  "scope": "global over 72 packaged tiles (2024)",
   "fit_split": "train",
-  "n_train_samples": 0,
+  "n_train_samples": 1734,
   "channels": [
     "era5_t2m",
     "era5_swvl1",
@@ -11,5 +11,34 @@
     "chirts_tmax",
     "chirts_tmin"
   ],
-  "stats": {}
+  "stats": {
+    "era5_t2m": {
+      "mean": 294.4967095287593,
+      "std": 7.584967463683347
+    },
+    "era5_swvl1": {
+      "mean": 0.07794176738591989,
+      "std": 0.11400462485467704
+    },
+    "era5_e": {
+      "mean": -0.00825963639215395,
+      "std": 0.013581133700131611
+    },
+    "era5_tp": {
+      "mean": 0.005372711519049205,
+      "std": 0.024802195624462942
+    },
+    "chirps_p": {
+      "mean": 0.4153181889275943,
+      "std": 2.312426663236761
+    },
+    "chirts_tmax": {
+      "mean": 300.7405552068497,
+      "std": 8.527517203315977
+    },
+    "chirts_tmin": {
+      "mean": 288.043403981152,
+      "std": 6.8121486469650065
+    }
+  }
 }

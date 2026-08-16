@@ -1,24 +1,24 @@
 {
-  "scope": "global over 1 packaged tiles (2019)",
-  "n_tiles": 1,
+  "scope": "global over 73 packaged tiles (2024)",
+  "n_tiles": 73,
   "counts": {
-    "0": 0,
-    "1": 50176,
-    "2": 0,
-    "3": 0
+    "0": 19673648,
+    "1": 74015824,
+    "2": 13800359,
+    "3": 30111090
   },
-  "selected_sample_compound_fraction": 0.0,
+  "selected_sample_compound_fraction": 0.218829131238155,
   "note": "selected_sample_compound_fraction is a DATASET statistic (D7 enrichment), NOT the \u00a74.4 gate - run scripts/data/check_gate.py for that.",
   "class_weights_median_freq": [
-    0.0,
-    1.0,
-    0.0,
-    0.0
+    1.2652645305029346,
+    0.3363114487518237,
+    1.803747931484971,
+    0.8266844209226568
   ],
   "class_weights_inverse": [
-    0.0,
-    0.25,
-    0.0,
-    0.0
+    1.748543546677261,
+    0.4647685912407055,
+    2.492705461502849,
+    1.1424438720086187
   ]
 }
