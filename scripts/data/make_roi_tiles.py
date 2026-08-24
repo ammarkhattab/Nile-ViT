@@ -27,6 +27,39 @@ with contextlib.suppress(ImportError):
 app = typer.Typer(add_completion=False, help=__doc__)
 
 
+def validate_against_hls(
+    tiles: list[str],
+    bboxes: dict[str, list[float]],
+    *,
+    datetime_range: str = "2020-07-01/2020-07-31",
+    progress_every: int = 20,
+) -> tuple[list[str], list[str]]:
+    """Split ``tiles`` into (served_by_hls, phantom) by querying the HLS catalog.
+
+    ``tile_for_point`` can emit MGRS squares the Sentinel-2 / HLS grid never
+    produces -- e.g. ``T34REA``/``T34RFA``/``T34RGA`` near the 32°N band edge, where
+    the ``*A`` row actually belongs to band S. Those tiles are valid MGRS strings
+    with no product behind them, so tiling them always yields zero samples and a
+    spurious failure. One catalog pass removes them for good.
+    """
+    from nilevit.hls_stac import HLS_COLLECTIONS, open_catalog, tile_from_id
+
+    catalog = open_catalog()
+    served: list[str] = []
+    phantom: list[str] = []
+    for i, tile in enumerate(tiles, start=1):
+        search = catalog.search(
+            collections=list(HLS_COLLECTIONS),
+            bbox=list(bboxes[tile]),
+            datetime=datetime_range,
+        )
+        found = {tile_from_id(item.id) for item in search.items()}
+        (served if tile in found else phantom).append(tile)
+        if progress_every and i % progress_every == 0:
+            typer.echo(f"    checked {i}/{len(tiles)} ...")
+    return served, phantom
+
+
 @app.command()
 def main(
     out: Path = typer.Option(Path("configs/roi_tiles.json"), help="Output tile-coverage JSON."),
@@ -35,6 +68,11 @@ def main(
     label_raster: Path | None = typer.Option(
         None,
         help="Optional M3 label_*.tif: flag ROI tiles overlapping valid land.",
+    ),
+    validate_hls: bool = typer.Option(
+        False,
+        "--validate-hls",
+        help="Query the HLS catalog and drop land tiles with no product (network).",
     ),
 ) -> None:
     """Enumerate ROI + OOD MGRS tiles and write the coverage JSON."""
@@ -45,6 +83,14 @@ def main(
         doc["land_reference"] = str(label_raster)
         doc["n_land_roi_tiles"] = len(land)
         doc["land_roi_tiles"] = land
+
+        if validate_hls:
+            typer.echo(f"  validating {len(land)} land tiles against the HLS catalog...")
+            served, phantom = validate_against_hls(land, doc["roi_tiles"])
+            doc["land_roi_tiles"] = served
+            doc["n_land_roi_tiles"] = len(served)
+            doc["hls_phantom_tiles"] = phantom
+            doc["hls_validated"] = True
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
@@ -57,6 +103,9 @@ def main(
             f"  land ROI tiles: {doc['n_land_roi_tiles']}  "
             f"({doc['n_roi_tiles'] - doc['n_land_roi_tiles']} ocean/no-data pruned)"
         )
+    if doc.get("hls_phantom_tiles"):
+        phantom = doc["hls_phantom_tiles"]
+        typer.echo(f"  HLS phantom tiles dropped: {len(phantom)}  {phantom[:8]}")
     sample = list(doc["roi_tiles"])[:8]
     typer.echo(f"  e.g. {sample} ...")
 
