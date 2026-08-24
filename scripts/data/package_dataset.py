@@ -40,6 +40,15 @@ console = Console()
 TRAIN_SPLIT = "train"
 USABLE_SPLITS = ("train", "val", "test", "ood")
 
+# Global artifacts (class weights, meteo norm) must be pooled over a meaningful
+# number of tiles. A 1-tile pool once produced weights [0, 1, 0, 0] and z-score
+# stats fit on zero train samples, clobbering good files.
+MIN_POOL_TILES = 10
+
+
+class SmallPoolError(RuntimeError):
+    """Raised when a global artifact would be overwritten from too few tiles."""
+
 
 def tiled_inputs(interim: Path, year: int, subset: set[str] | None) -> list[tuple[str, Path]]:
     """Find (tile, parquet) for every 05b index of the given year."""
@@ -112,20 +121,39 @@ def meteo_cmd(
     ]
 
 
-def aggregate_class_weights(scratch: Path, year: int, out: Path) -> dict:
-    """Pool per-tile class histograms -> global weights (PRD §5.2 class-weighted loss)."""
+def aggregate_class_weights(scratch: Path, year: int, out: Path, *, force: bool = False) -> dict:
+    """Pool per-tile class histograms -> global weights (PRD §5.2 class-weighted loss).
+
+    Pools over EVERY year's scratch stats, not just ``year``: these artifacts are
+    global to the dataset, so scoping them to one year silently makes each run
+    overwrite the last. ``year`` is recorded for provenance only.
+
+    Refuses to overwrite an existing artifact from a pool smaller than
+    ``MIN_POOL_TILES`` unless ``force`` -- a single-tile pool produced degenerate
+    weights like [0, 1, 0, 0] and clobbered a good file.
+    """
     from nilevit.tiles import class_weights_from_counts
 
     counts = {0: 0, 1: 0, 2: 0, 3: 0}
     n_tiles = 0
-    for path in sorted(scratch.glob(f"weights_*_{year}.json")):
+    years: set[str] = set()
+    for path in sorted(scratch.glob("weights_*_*.json")):
         report = json.loads(path.read_text())
         for cls, value in report.get("counts", {}).items():
             counts[int(cls)] += int(value)
+        years.add(path.stem.rsplit("_", 1)[-1])
         n_tiles += 1
+
+    if n_tiles < MIN_POOL_TILES and out.exists() and not force:
+        raise SmallPoolError(
+            f"refusing to overwrite {out} from only {n_tiles} tile(s) "
+            f"(min {MIN_POOL_TILES}); re-run with --force to override"
+        )
+
     total = sum(counts.values())
     doc = {
-        "scope": f"global over {n_tiles} packaged tiles ({year})",
+        "scope": f"global over {n_tiles} packaged tiles, years {sorted(years)}",
+        "triggering_year": year,
         "n_tiles": n_tiles,
         "counts": counts,
         "selected_sample_compound_fraction": (counts[3] / total if total else 0.0),
@@ -141,8 +169,13 @@ def aggregate_class_weights(scratch: Path, year: int, out: Path) -> dict:
     return doc
 
 
-def aggregate_meteo_norm(interim: Path, year: int, out: Path) -> dict:
-    """Refit z-score stats over the TRAIN series of every packaged tile."""
+def aggregate_meteo_norm(interim: Path, year: int, out: Path, *, force: bool = False) -> dict:
+    """Refit z-score stats over the TRAIN series of every packaged tile, ALL years.
+
+    Like the class weights, this artifact is global to the dataset; scoping it to a
+    single year made each run overwrite the last (and a 1-tile run fit the stats on
+    zero train samples). ``year`` is provenance only.
+    """
     import geopandas as gpd
     import xarray as xr
 
@@ -150,9 +183,12 @@ def aggregate_meteo_norm(interim: Path, year: int, out: Path) -> dict:
 
     series = []
     n_tiles = 0
-    for parquet in sorted(interim.glob(f"tiles_*_{year}_labeled.parquet")):
-        tile = parquet.stem.split("_")[1]
-        store = interim / f"tiles_{tile}_{year}_meteo.zarr"
+    years: set[str] = set()
+    for parquet in sorted(interim.glob("tiles_*_*_labeled.parquet")):
+        parts = parquet.stem.split("_")  # tiles_<TILE>_<YEAR>_labeled
+        tile, tile_year = parts[1], parts[2]
+        years.add(tile_year)
+        store = interim / f"tiles_{tile}_{tile_year}_meteo.zarr"
         if not store.exists():
             continue
         index = gpd.read_parquet(parquet).set_index("sample_id")
@@ -165,9 +201,16 @@ def aggregate_meteo_norm(interim: Path, year: int, out: Path) -> dict:
         dataset.close()
         n_tiles += 1
 
+    if n_tiles < MIN_POOL_TILES and out.exists() and not force:
+        raise SmallPoolError(
+            f"refusing to overwrite {out} from only {n_tiles} tile(s) "
+            f"(min {MIN_POOL_TILES}); re-run with --force to override"
+        )
+
     stats = meteo_channel_stats(series) if series else {}
     doc = {
-        "scope": f"global over {n_tiles} packaged tiles ({year})",
+        "scope": f"global over {n_tiles} packaged tiles, years {sorted(years)}",
+        "triggering_year": year,
         "fit_split": TRAIN_SPLIT,
         "n_train_samples": len(series),
         "channels": list(METEO_CHANNELS),
@@ -195,6 +238,9 @@ def main(
         False, "--aggregate-only", help="Skip per-tile runs; just recompute global stats."
     ),
     stop_on_fail: bool = typer.Option(False, "--stop-on-fail"),
+    force: bool = typer.Option(
+        False, "--force", help="Allow overwriting global stats from a small tile pool."
+    ),
 ) -> None:
     """Package all tiled tiles for a year, then recompute the global stats."""
     labels_dir = labels_dir or interim / f"labels_{year}"
@@ -269,8 +315,12 @@ def main(
                     raise typer.Exit(code=1)
 
     console.rule("[bold]global aggregation")
-    weights = aggregate_class_weights(scratch, year, weights_out)
-    norm = aggregate_meteo_norm(interim, year, norm_out)
+    try:
+        weights = aggregate_class_weights(scratch, year, weights_out, force=force)
+        norm = aggregate_meteo_norm(interim, year, norm_out, force=force)
+    except SmallPoolError as exc:
+        console.print(f"[red]ERROR[/red] {exc}")
+        raise typer.Exit(code=1) from exc
     console.print(f"wrote {weights_out}  (pooled over {weights['n_tiles']} tiles)")
     console.print(f"  counts: {weights['counts']}")
     console.print(

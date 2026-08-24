@@ -20,8 +20,10 @@ applied here.
 
 from __future__ import annotations
 
+import json
 import warnings
 from collections.abc import Sequence
+from pathlib import Path
 
 # §4.1 regions, bbox = (west, south, east, north).
 ROI_BBOX: tuple[float, float, float, float] = (22.0, 30.0, 36.0, 37.0)
@@ -29,6 +31,12 @@ OOD_BBOX: tuple[float, float, float, float] = (-10.0, 30.0, 12.0, 37.0)
 
 # 100 km-square corners at 1 m precision: SW, SE, NW, NE (easting5 northing5).
 _CORNERS = ("0000000000", "9999900000", "0000099999", "9999999999")
+
+# Sampled tile extents are padded so the search box fully covers the 100 km square
+# (a tile spans ~0.9-1.1 deg; sampling at 0.05 deg leaves at most half a step short).
+_BBOX_PAD_DEG = 0.15
+
+_CONFIG_BBOX_CACHE: dict[str, tuple[float, float, float, float]] | None = None
 
 
 def _mgrs_handle():
@@ -49,8 +57,13 @@ def tile_for_point(lat: float, lon: float, handle=None) -> str | None:
     return f"T{ref}"
 
 
-def tile_bbox(tile_id: str, handle=None) -> tuple[float, float, float, float]:
-    """True (west, south, east, north) of a tile's 100 km square."""
+def _corner_bbox(tile_id: str, handle=None) -> tuple[float, float, float, float]:
+    """(west, south, east, north) from the 100 km-square corners.
+
+    UNRELIABLE near MGRS band boundaries -- the inverse round-trip clamps to the
+    zone's central meridian and can describe a neighbouring square. Kept only as a
+    fallback for tiles absent from ``configs/roi_tiles.json``; prefer ``tile_bbox``.
+    """
     handle = handle or _mgrs_handle()
     square = tile_id.removeprefix("T")
     lats: list[float] = []
@@ -69,29 +82,81 @@ def tile_bbox(tile_id: str, handle=None) -> tuple[float, float, float, float]:
     )
 
 
+def _config_bboxes(path: Path | None = None) -> dict[str, tuple[float, float, float, float]]:
+    """Cached tile -> bbox map from configs/roi_tiles.json (ROI + OOD)."""
+    global _CONFIG_BBOX_CACHE
+    if _CONFIG_BBOX_CACHE is not None:
+        return _CONFIG_BBOX_CACHE
+    path = path or Path("configs/roi_tiles.json")
+    boxes: dict[str, tuple[float, float, float, float]] = {}
+    if path.exists():
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("roi_tiles", "ood_tiles"):
+            for tile, box in doc.get(key, {}).items():
+                boxes[tile] = tuple(box)  # type: ignore[assignment]
+    _CONFIG_BBOX_CACHE = boxes
+    return boxes
+
+
+def tile_bbox(tile_id: str, handle=None) -> tuple[float, float, float, float]:
+    """Search bbox (west, south, east, north) covering a tile.
+
+    Prefers the enumerated box in ``configs/roi_tiles.json`` (derived from the
+    reliable forward MGRS mapping); falls back to the corner round-trip only for
+    tiles not in that config. See ``mgrs_tiles_in_bbox`` for why the round-trip is
+    not trusted.
+    """
+    box = _config_bboxes().get(tile_id)
+    if box is not None:
+        return box
+    return _corner_bbox(tile_id, handle)
+
+
 def mgrs_tiles_in_bbox(
     bbox: Sequence[float], *, step_deg: float = 0.05, buffer_deg: float = 0.1
 ) -> dict[str, tuple[float, float, float, float]]:
-    """Map each MGRS tile intersecting ``bbox`` to its true 100 km-square bbox.
+    """Map each MGRS tile intersecting ``bbox`` to a bbox that covers it.
 
     Samples ``bbox`` (expanded by ``buffer_deg`` so edge tiles are caught) on a
-    ``step_deg`` grid, collects the unique squares, and computes each tile's bbox.
+    ``step_deg`` grid and accumulates, per tile, the extent of the sample points
+    that fall in it -- then pads by ``_BBOX_PAD_DEG``.
+
+    Why sampled extents rather than the 100 km-square corners: the *forward*
+    mapping (``toMGRS``) is reliable, but the inverse round-trip
+    (``toLatLon(square + "0000000000")``) mis-resolves squares near MGRS band
+    boundaries -- it clamps to the zone's central meridian and returns a
+    neighbouring square's footprint. That produced STAC searches which returned
+    only foreign tiles, so those tiles silently yielded zero samples. Bboxes here
+    are search bounds, and ``hls_stac.filter_items_for_tile`` does the exact
+    per-tile selection, so erring slightly large is safe; erring *wrong* is not.
     """
     west, south, east, north = bbox
     handle = _mgrs_handle()
 
-    tiles: set[str] = set()
+    extents: dict[str, list[float]] = {}
     lat = south - buffer_deg
     while lat <= north + buffer_deg + 1e-9:
         lon = west - buffer_deg
         while lon <= east + buffer_deg + 1e-9:
             tile = tile_for_point(lat, lon, handle)
             if tile is not None:
-                tiles.add(tile)
+                box = extents.setdefault(tile, [lon, lat, lon, lat])
+                box[0] = min(box[0], lon)
+                box[1] = min(box[1], lat)
+                box[2] = max(box[2], lon)
+                box[3] = max(box[3], lat)
             lon += step_deg
         lat += step_deg
 
-    return {tile: tile_bbox(tile, handle) for tile in sorted(tiles)}
+    return {
+        tile: (
+            round(box[0] - _BBOX_PAD_DEG, 4),
+            round(box[1] - _BBOX_PAD_DEG, 4),
+            round(box[2] + _BBOX_PAD_DEG, 4),
+            round(box[3] + _BBOX_PAD_DEG, 4),
+        )
+        for tile, box in sorted(extents.items())
+    }
 
 
 def enumerate_roi_tiles(
