@@ -212,13 +212,19 @@ def _stac_scenes(
     want_date: date | None,
     cloud_max: float,
     composite_dates: list[str] | None = None,
+    catalog_name: str | None = None,
 ) -> dict[date, Scene]:
-    """Search PC STAC -> per-date signed band hrefs (§10.3 streaming; no download).
+    """Search STAC -> per-date band hrefs (§10.3 streaming; no download).
+
+    The catalog defaults to whichever hosts the year: Planetary Computer for 2020+,
+    NASA CMR / LP DAAC for earlier years (PC's HLS collections start 2020). Pass
+    ``catalog_name`` to override.
 
     When ``composite_dates`` is given, applies the D7 temporal rule: one least-cloudy
     scene per MODIS-composite window instead of every acquisition.
     """
     from nilevit.hls_stac import (
+        catalog_for_year,
         hrefs_by_date,
         one_scene_per_window,
         open_catalog,
@@ -230,8 +236,16 @@ def _stac_scenes(
         date_range = f"{want_date.isoformat()}/{want_date.isoformat()}"
     else:
         date_range = f"{year:04d}-01-01/{year:04d}-12-31"
-    catalog = open_catalog()
-    items = search_hls_items(catalog, tile, tile_bbox(tile), date_range, cloud_max=cloud_max)
+    name = catalog_name or catalog_for_year(year)
+    catalog = open_catalog(name)
+    items = search_hls_items(
+        catalog,
+        tile,
+        tile_bbox(tile),
+        date_range,
+        cloud_max=cloud_max,
+        catalog_name=name,
+    )
     grouped = (
         one_scene_per_window(items, composite_dates) if composite_dates else hrefs_by_date(items)
     )
@@ -250,11 +264,12 @@ def _resolve_scenes(
     want_date: date | None,
     cloud_max: float,
     composite_dates: list[str] | None = None,
+    catalog_name: str | None = None,
 ) -> dict[date, Scene]:
     """Dispatch to the disk or STAC scene resolver."""
     if source == "disk":
         return _disk_scenes(hls_dir)
-    return _stac_scenes(tile, year, want_date, cloud_max, composite_dates)
+    return _stac_scenes(tile, year, want_date, cloud_max, composite_dates, catalog_name)
 
 
 @app.command()
@@ -282,6 +297,11 @@ def main(
     ),
     cloud_max: float = typer.Option(
         50.0, "--cloud-max", help="STAC only: max eo:cloud_cover percent [0..100]."
+    ),
+    catalog: str | None = typer.Option(
+        None,
+        "--catalog",
+        help="STAC catalog: 'pc' (2020+) or 'cmr' (NASA, pre-2020). Default: by year.",
     ),
     labels_dir: Path | None = typer.Option(
         None,
@@ -345,7 +365,9 @@ def main(
     # Both sources normalise to this so the patch loop is source-agnostic; a source
     # string is a local path (disk) or a signed COG href (stac) - rioxarray reads
     # either identically.
-    scenes = _resolve_scenes(source, hls_dir, tile, year, want_date, cloud_max, composite_dates)
+    scenes = _resolve_scenes(
+        source, hls_dir, tile, year, want_date, cloud_max, composite_dates, catalog
+    )
     avail = sorted(scenes)
     if all_dates:
         dates = avail
@@ -370,7 +392,13 @@ def main(
     plan.add_column(style="dim")
     plan.add_column(style="bold")
     plan.add_row("Tile / year", f"{tile} / {year}")
-    plan.add_row("Source", source + (f" (cloud<{cloud_max})" if source == "stac" else ""))
+    if source == "stac":
+        from nilevit.hls_stac import catalog_for_year
+
+        _cat = catalog or catalog_for_year(year)
+        plan.add_row("Source", f"stac:{_cat} (cloud<{cloud_max})")
+    else:
+        plan.add_row("Source", source)
     plan.add_row("Dates", f"{len(dates)} ({dates[0]} .. {dates[-1]})")
     plan.add_row("Patch size", f"{PATCH}x{PATCH}")
     plan.add_row("Bands", ", ".join(BAND_NAMES))

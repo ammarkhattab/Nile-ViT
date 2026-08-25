@@ -1,25 +1,25 @@
 {
-  "scope": "global over 359 packaged tiles, years ['2019', '2020', '2021', '2022', '2023', '2024']",
+  "scope": "global over 379 packaged tiles, years ['2019', '2020', '2021', '2022', '2023', '2024']",
   "triggering_year": 2024,
-  "n_tiles": 359,
+  "n_tiles": 379,
   "counts": {
-    "0": 127127326,
-    "1": 255172254,
-    "2": 250031384,
-    "3": 115441039
+    "0": 129609196,
+    "1": 258383952,
+    "2": 260936304,
+    "3": 116742422
   },
-  "selected_sample_compound_fraction": 0.1543799962245979,
+  "selected_sample_compound_fraction": 0.1524705633891418,
   "note": "selected_sample_compound_fraction is a DATASET statistic (D7 enrichment), NOT the \u00a74.4 gate - run scripts/data/check_gate.py for that.",
   "class_weights_median_freq": [
-    1.483389613653952,
-    0.7390276648181351,
-    0.7542227378943758,
-    1.6335555936914257
+    1.4967809382908293,
+    0.7508073643830635,
+    0.7434633319555257,
+    1.6617487514521498
   ],
   "class_weights_inverse": [
-    1.4705178393353449,
-    0.7326149211739925,
-    0.747678142476706,
-    1.6193807884040268
+    1.4768857026163482,
+    0.7408276211364706,
+    0.7335812057029826,
+    1.6396607610213878
   ]
 }

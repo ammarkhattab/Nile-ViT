@@ -1,31 +1,77 @@
-"""Microsoft Planetary Computer STAC access for HLS v2.0 (streaming, no bulk DL).
+"""HLS v2.0 STAC access for streaming (no bulk download), from PC or NASA CMR.
 
 Per PRD §10.3 raw HLS is streamed, not bulk-downloaded: 05b (``--source stac``)
-resolves each (tile, date) to signed COG hrefs via this module and reads bands on
-demand with rioxarray. The ``(tile, date, sensor, {band: href})`` manifest this
-builds is the dataset's reproducibility artifact ("re-tile from public STAC").
+resolves each (tile, date) to COG hrefs via this module and reads bands on demand
+with rioxarray. The ``(tile, date, sensor, {band: href})`` manifest this builds is
+the dataset's reproducibility artifact ("re-tile from public STAC").
 
-Confirmed against the live catalog (probe, 2023-08 T36RUU):
-  * collections: ``hls2-s30`` (Sentinel-2), ``hls2-l30`` (Landsat); anonymous sign.
-  * asset keys are raw band codes B01..B12/B8A + ``Fmask``.
-  * item ids look like ``HLS.S30.T36RUU.2023243T082611.v2.0`` -> sensor + tile.
+TWO catalogs, because neither covers the full span:
+  * ``pc``  - Microsoft Planetary Computer. Anonymous, fast, but its ``hls2-*``
+              collections start **2020-01-01** (confirmed from collection extents).
+  * ``cmr`` - NASA CMR / LP DAAC. Covers 2013+ (L30) and 2015+ (S30), so it is the
+              only source for 2017-2019. Assets live behind Earthdata auth, so GDAL
+              must be pointed at a ``~/_netrc`` (see ``configure_earthdata_gdal``).
 
-The band-code map lives in ``nilevit/hls_bands.py`` (shared with 05b's disk path),
-so S30/L30 logic is single-sourced; all catalog/network calls are injected, so the
-pure logic is offline-testable.
+Granule ids are identical across both (``HLS.S30.T36RUU.2023243T082611.v2.0``), and
+both expose raw band codes + ``Fmask`` as assets, so every downstream helper here
+(sensor/tile parsing, band mapping, window selection) works unchanged. The band-code
+map lives in ``nilevit/hls_bands.py``, shared with 05b's disk path.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 from nilevit.hls_bands import HLS_BAND_MAP
 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
+CMR_STAC_URL = "https://cmr.earthdata.nasa.gov/stac/LPCLOUD"
 HLS_COLLECTIONS: tuple[str, ...] = ("hls2-s30", "hls2-l30")
+CMR_COLLECTIONS: tuple[str, ...] = ("HLSS30.v2.0", "HLSL30.v2.0")
 FMASK_ASSET = "Fmask"
+
+# PC's HLS collections begin here; earlier years must come from CMR.
+PC_FIRST_YEAR = 2020
+
+CATALOG_SPECS: dict[str, dict[str, Any]] = {
+    "pc": {
+        "url": PC_STAC_URL,
+        "collections": HLS_COLLECTIONS,
+        "sign": True,  # planetary_computer.sign_inplace
+        "server_side_cloud": True,  # honours the `query` extension
+    },
+    "cmr": {
+        "url": CMR_STAC_URL,
+        "collections": CMR_COLLECTIONS,
+        "sign": False,  # Earthdata auth happens at GDAL read time
+        "server_side_cloud": False,  # filter client-side; CMR STAC is limited
+    },
+}
+
+
+def catalog_for_year(year: int) -> str:
+    """'pc' for years PC hosts (>=2020), else 'cmr' (NASA LP DAAC)."""
+    return "pc" if year >= PC_FIRST_YEAR else "cmr"
+
+
+def configure_earthdata_gdal(cookie_file: str | None = None) -> None:
+    """Point GDAL at the Earthdata ``_netrc`` so protected LP DAAC COGs can stream.
+
+    LP DAAC assets sit behind an Earthdata Login redirect; without cookie handling
+    GDAL receives the HTML login page and reports "not recognized as a supported
+    file format". Credentials come from ``~/_netrc`` (Windows) or ``~/.netrc``,
+    which ``earthaccess.login(persist=True)`` writes. Idempotent.
+    """
+    cookies = cookie_file or str(Path.home() / ".gdal_earthdata_cookies.txt")
+    os.environ.setdefault("GDAL_HTTP_COOKIEFILE", cookies)
+    os.environ.setdefault("GDAL_HTTP_COOKIEJAR", cookies)
+    os.environ.setdefault("GDAL_HTTP_NETRC", "YES")
+    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
 
 
 def sensor_from_id(item_id: str) -> str | None:
@@ -84,12 +130,28 @@ def filter_items_for_tile(items: Iterable[Any], tile: str) -> list[Any]:
     return [it for it in items if tile_from_id(it.id) == tile]
 
 
-def open_catalog(stac_url: str = PC_STAC_URL) -> Any:
-    """Open the PC STAC catalog with anonymous asset signing (network)."""
-    import planetary_computer as pc
+def open_catalog(catalog: str = "pc", stac_url: str | None = None) -> Any:
+    """Open a STAC catalog: ``pc`` (anonymous signing) or ``cmr`` (Earthdata auth).
+
+    For ``cmr`` this also configures GDAL for Earthdata so the protected COGs can be
+    streamed later by rioxarray.
+    """
     import pystac_client
 
-    return pystac_client.Client.open(stac_url, modifier=pc.sign_inplace)
+    spec = CATALOG_SPECS[catalog]
+    url = stac_url or spec["url"]
+    if spec["sign"]:
+        import planetary_computer as pc
+
+        return pystac_client.Client.open(url, modifier=pc.sign_inplace)
+    configure_earthdata_gdal()
+    return pystac_client.Client.open(url)
+
+
+def cloud_cover(item: Any) -> float:
+    """``eo:cloud_cover`` as a float; 100.0 when absent (treated as fully cloudy)."""
+    value = item.properties.get("eo:cloud_cover")
+    return 100.0 if value is None else float(value)
 
 
 def search_hls_items(
@@ -99,23 +161,34 @@ def search_hls_items(
     date_range: str,
     *,
     cloud_max: float = 50.0,
-    collections: Sequence[str] = HLS_COLLECTIONS,
+    collections: Sequence[str] | None = None,
+    catalog_name: str = "pc",
 ) -> list[Any]:
-    """Search both HLS collections for one tile/date-range, cloud-filtered (network).
+    """Search the HLS collections for one tile/date-range, cloud-filtered (network).
 
-    Filters to the exact tile id (bbox search returns neighbouring tiles too) and
-    sorts by acquisition date.
+    Filters to the exact tile id (a bbox search also returns neighbouring tiles) and
+    sorts by acquisition date. Cloud filtering is server-side where the catalog
+    supports the ``query`` extension (PC) and client-side otherwise (CMR), so the
+    result is the same either way.
     """
-    query = {"eo:cloud_cover": {"lt": cloud_max}}
+    spec = CATALOG_SPECS[catalog_name]
+    colls = list(collections) if collections is not None else list(spec["collections"])
+    server_side = bool(spec["server_side_cloud"])
+
     found: list[Any] = []
-    for coll in collections:
-        search = catalog.search(
-            collections=[coll],
-            bbox=list(bbox),
-            datetime=date_range,
-            query=query,
-        )
-        found.extend(filter_items_for_tile(search.items(), tile))
+    for coll in colls:
+        kwargs: dict[str, Any] = {
+            "collections": [coll],
+            "bbox": list(bbox),
+            "datetime": date_range,
+        }
+        if server_side:
+            kwargs["query"] = {"eo:cloud_cover": {"lt": cloud_max}}
+        search = catalog.search(**kwargs)
+        items = filter_items_for_tile(search.items(), tile)
+        if not server_side:
+            items = [it for it in items if cloud_cover(it) < cloud_max]
+        found.extend(items)
     found.sort(key=lambda it: (date_from_item(it), it.id))
     return found
 
@@ -162,8 +235,7 @@ def one_scene_per_window(
     best: dict[date, tuple[float, Any]] = {}
     for it in items:
         acq = date_from_item(it)
-        cloud = it.properties.get("eo:cloud_cover")
-        cloud = 100.0 if cloud is None else float(cloud)
+        cloud = cloud_cover(it)
         window = next((w for w in windows if w <= acq < w + timedelta(days=window_days)), None)
         if window is None:
             continue

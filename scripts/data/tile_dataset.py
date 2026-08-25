@@ -65,8 +65,13 @@ def build_command(
     output_dir: Path,
     cloud_max: float,
     keep: dict[int, float],
+    catalog: str | None = None,
 ) -> list[str]:
-    """05b invocation for one (tile, year) with D7 selection."""
+    """05b invocation for one (tile, year) with D7 selection.
+
+    ``catalog`` is normally left None so 05b picks by year (PC for 2020+, NASA CMR
+    for earlier years, whose imagery PC does not host).
+    """
     return [
         py,
         str(script),
@@ -91,6 +96,7 @@ def build_command(
         str(keep[2]),
         "--keep-compound",
         str(keep[3]),
+        *(["--catalog", catalog] if catalog else []),
     ]
 
 
@@ -125,6 +131,9 @@ def main(
     keep_compound: float = typer.Option(DEFAULT_KEEP_PROB[3], "--keep-compound"),
     manifest: Path = typer.Option(
         Path("data/interim/tiling_manifest.json"), help="Resume manifest."
+    ),
+    catalog: str | None = typer.Option(
+        None, "--catalog", help="Force a STAC catalog ('pc' or 'cmr'); default: by year."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan; tile nothing."),
     stop_on_fail: bool = typer.Option(False, "--stop-on-fail", help="Abort on first fail."),
@@ -188,7 +197,7 @@ def main(
     for year, tile, labels_dir in work:
         console.rule(f"[bold]{year} {tile}")
         cmd = build_command(
-            sys.executable, script, tile, year, labels_dir, output_dir, cloud_max, keep
+            sys.executable, script, tile, year, labels_dir, output_dir, cloud_max, keep, catalog
         )
         result = subprocess.run(cmd, check=False)
         if result.returncode == 0:
