@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -272,6 +273,34 @@ def _resolve_scenes(
     return _stac_scenes(tile, year, want_date, cloud_max, composite_dates, catalog_name)
 
 
+def open_raster_with_retry(src: str, *, attempts: int = 4, base_delay: float = 2.0):
+    """Open a raster, retrying transient streaming failures (PRD risk I3).
+
+    Streamed COGs -- especially Earthdata-protected LP DAAC assets -- intermittently
+    return an auth-redirect or throttle page instead of the file, which GDAL reports
+    as "not recognized as being in a supported file format". Retrying with
+    exponential backoff clears it; a persistent failure raises so the caller can skip
+    the date rather than abort the whole run.
+    """
+    import rioxarray
+
+    def _try_open(path: str):
+        """Single attempt; rasterio raises several exception types on transient fails."""
+        try:
+            return rioxarray.open_rasterio(path), None
+        except Exception as exc:
+            return None, exc
+
+    last: Exception | None = None
+    for attempt in range(attempts):
+        opened, last = _try_open(src)
+        if opened is not None:
+            return opened
+        if attempt < attempts - 1:
+            time.sleep(base_delay * (2**attempt))
+    raise RuntimeError(f"failed to open after {attempts} attempts: {src}") from last
+
+
 @app.command()
 def main(
     tile: str = typer.Option("T36RUU", "--tile", "-t", help="HLS MGRS tile id."),
@@ -443,6 +472,7 @@ def main(
 
     total_written, total_dropped, total_dup = 0, 0, 0
     total_deselected = 0
+    total_failed_dates = 0
     label_cache: dict[str, object] = {}
     label_date_objs = [date.fromisoformat(x) for x in label_dates]
 
@@ -465,7 +495,12 @@ def main(
         label_da = _active_label(d) if select else None
 
         # Load the 6 bands + Fmask onto the native HLS grid (red = grid reference).
-        red_da = rioxarray.open_rasterio(band_sources["red"])
+        try:
+            red_da = open_raster_with_retry(band_sources["red"])
+        except RuntimeError as exc:
+            console.print(f"  [yellow]SKIP {d}: {exc}[/yellow]")
+            total_failed_dates += 1
+            continue
         h, w = red_da.shape[-2:]
         grid = patch_grid(h, w)
 
@@ -485,19 +520,26 @@ def main(
                 console.print(f"  [red]missing band {name} ({Path(src).name})[/red]")
                 band_arrs = []
                 break
-            da = rioxarray.open_rasterio(src)
+            try:
+                da = open_raster_with_retry(src)
+            except RuntimeError as exc:
+                console.print(f"  [yellow]{d}: band {name} unreadable ({exc})[/yellow]")
+                band_arrs = []
+                break
             band_arrs.append(da.values[0])  # (H, W)
         if not band_arrs:
             red_da.close()
             total_dropped += len(grid)
+            total_failed_dates += 1
             continue
 
         stack = np.stack(band_arrs, axis=0).astype(np.uint16)  # (6, H, W)
-        fmask = (
-            rioxarray.open_rasterio(fmask_source).values[0]
-            if fmask_source is not None
-            else np.zeros((h, w), dtype=np.uint8)
-        )
+        fmask = np.zeros((h, w), dtype=np.uint8)
+        if fmask_source is not None:
+            try:
+                fmask = open_raster_with_retry(fmask_source).values[0]
+            except RuntimeError:
+                console.print(f"  [yellow]{d}: Fmask unreadable; treating as clear[/yellow]")
         red = red_da.values[0]
 
         # UTM -> lon/lat transformer for patch centers.
@@ -588,7 +630,9 @@ def main(
     console.print(
         f"[green]Done: {total_written} written, {total_dropped} dropped "
         f"(low valid), {total_dup} skipped (dup)"
-        + (f", {total_deselected} deselected (D7).[/green]" if select else ".[/green]")
+        + (f", {total_deselected} deselected (D7)" if select else "")
+        + (f", {total_failed_dates} date(s) unreadable" if total_failed_dates else "")
+        + ".[/green]"
     )
 
     # ---- Verify ----

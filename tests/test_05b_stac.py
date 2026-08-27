@@ -53,8 +53,9 @@ def test_resolve_scenes_dispatches_to_stac(monkeypatch, tmp_path) -> None:
     sentinel = {date(2023, 8, 1): ("S30", {"red": "https://x/B04.tif"}, "https://x/F.tif")}
     captured = {}
 
-    def fake_stac(tile, year, want_date, cloud_max, composite_dates=None):
+    def fake_stac(tile, year, want_date, cloud_max, composite_dates=None, catalog_name=None):
         captured["composite_dates"] = composite_dates
+        captured["catalog_name"] = catalog_name
         return sentinel
 
     monkeypatch.setattr(m, "_stac_scenes", fake_stac)
