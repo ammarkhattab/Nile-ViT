@@ -239,14 +239,20 @@ def _stac_scenes(
         date_range = f"{year:04d}-01-01/{year:04d}-12-31"
     name = catalog_name or catalog_for_year(year)
     catalog = open_catalog(name)
-    items = search_hls_items(
-        catalog,
-        tile,
-        tile_bbox(tile),
-        date_range,
-        cloud_max=cloud_max,
-        catalog_name=name,
-    )
+    try:
+        items = search_hls_items(
+            catalog,
+            tile,
+            tile_bbox(tile),
+            date_range,
+            cloud_max=cloud_max,
+            catalog_name=name,
+        )
+    except RuntimeError as exc:
+        # Catalog unreachable after retries: report no scenes so the driver logs this
+        # tile as failed and moves on, rather than aborting the whole campaign.
+        console.print(f"[yellow]{tile}/{year}: STAC search failed ({exc})[/yellow]")
+        return {}
     grouped = (
         one_scene_per_window(items, composite_dates) if composite_dates else hrefs_by_date(items)
     )
@@ -273,7 +279,38 @@ def _resolve_scenes(
     return _stac_scenes(tile, year, want_date, cloud_max, composite_dates, catalog_name)
 
 
-def open_raster_with_retry(src: str, *, attempts: int = 4, base_delay: float = 2.0):
+def read_band_with_retry(src: str, *, attempts: int = 5, base_delay: float = 2.0):
+    """Open a raster AND pull its pixels, retrying transient streaming failures.
+
+    Retrying the *open* alone is not enough: opening a COG only fetches headers, so
+    NASA CMR's truncated-body failures surface later at ``.values`` as
+    ``TIFFReadEncodedTile() failed ... got N bytes, expected M``. Both steps run
+    inside the retry so a partial read is retried rather than propagating.
+
+    Returns the (H, W) array; raises RuntimeError once attempts are exhausted so the
+    caller can skip the date instead of aborting the run (PRD risk I3).
+    """
+    import numpy as np
+    import rioxarray
+
+    def _try_read(path: str):
+        try:
+            handle = rioxarray.open_rasterio(path)
+            return np.asarray(handle.values[0]), None
+        except Exception as exc:
+            return None, exc
+
+    last: Exception | None = None
+    for attempt in range(attempts):
+        values, last = _try_read(src)
+        if values is not None:
+            return values
+        if attempt < attempts - 1:
+            time.sleep(base_delay * (2**attempt))
+    raise RuntimeError(f"failed to read after {attempts} attempts: {src}") from last
+
+
+def open_raster_with_retry(src: str, *, attempts: int = 5, base_delay: float = 2.0):
     """Open a raster, retrying transient streaming failures (PRD risk I3).
 
     Streamed COGs -- especially Earthdata-protected LP DAAC assets -- intermittently
@@ -521,12 +558,11 @@ def main(
                 band_arrs = []
                 break
             try:
-                da = open_raster_with_retry(src)
+                band_arrs.append(read_band_with_retry(src))  # (H, W)
             except RuntimeError as exc:
                 console.print(f"  [yellow]{d}: band {name} unreadable ({exc})[/yellow]")
                 band_arrs = []
                 break
-            band_arrs.append(da.values[0])  # (H, W)
         if not band_arrs:
             red_da.close()
             total_dropped += len(grid)
@@ -537,10 +573,16 @@ def main(
         fmask = np.zeros((h, w), dtype=np.uint8)
         if fmask_source is not None:
             try:
-                fmask = open_raster_with_retry(fmask_source).values[0]
+                fmask = read_band_with_retry(fmask_source)
             except RuntimeError:
                 console.print(f"  [yellow]{d}: Fmask unreadable; treating as clear[/yellow]")
-        red = red_da.values[0]
+        try:
+            red = read_band_with_retry(band_sources["red"])
+        except RuntimeError as exc:
+            console.print(f"  [yellow]SKIP {d}: red band unreadable ({exc})[/yellow]")
+            red_da.close()
+            total_failed_dates += 1
+            continue
 
         # UTM -> lon/lat transformer for patch centers.
         crs = red_da.rio.crs

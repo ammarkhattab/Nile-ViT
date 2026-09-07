@@ -154,6 +154,31 @@ def cloud_cover(item: Any) -> float:
     return 100.0 if value is None else float(value)
 
 
+def _search_with_retry(catalog: Any, kwargs: dict[str, Any], *, attempts: int, delay: float):
+    """Run one STAC search, retrying transient catalog errors.
+
+    NASA CMR intermittently answers with an HTML error page instead of JSON under
+    load, which pystac_client surfaces as ``APIError: <html>``. Retrying with
+    exponential backoff clears it; without this a single blip kills a whole tile.
+    """
+    import time
+
+    def _try_search():
+        try:
+            return list(catalog.search(**kwargs).items()), None
+        except Exception as exc:
+            return None, exc
+
+    last: Exception | None = None
+    for attempt in range(attempts):
+        items, last = _try_search()
+        if items is not None:
+            return items
+        if attempt < attempts - 1:
+            time.sleep(delay * (2**attempt))
+    raise RuntimeError(f"STAC search failed after {attempts} attempts") from last
+
+
 def search_hls_items(
     catalog: Any,
     tile: str,
@@ -163,13 +188,15 @@ def search_hls_items(
     cloud_max: float = 50.0,
     collections: Sequence[str] | None = None,
     catalog_name: str = "pc",
+    attempts: int = 4,
+    retry_delay: float = 3.0,
 ) -> list[Any]:
     """Search the HLS collections for one tile/date-range, cloud-filtered (network).
 
     Filters to the exact tile id (a bbox search also returns neighbouring tiles) and
     sorts by acquisition date. Cloud filtering is server-side where the catalog
     supports the ``query`` extension (PC) and client-side otherwise (CMR), so the
-    result is the same either way.
+    result is the same either way. Searches are retried (CMR is flaky under load).
     """
     spec = CATALOG_SPECS[catalog_name]
     colls = list(collections) if collections is not None else list(spec["collections"])
@@ -184,8 +211,8 @@ def search_hls_items(
         }
         if server_side:
             kwargs["query"] = {"eo:cloud_cover": {"lt": cloud_max}}
-        search = catalog.search(**kwargs)
-        items = filter_items_for_tile(search.items(), tile)
+        raw = _search_with_retry(catalog, kwargs, attempts=attempts, delay=retry_delay)
+        items = filter_items_for_tile(raw, tile)
         if not server_side:
             items = [it for it in items if cloud_cover(it) < cloud_max]
         found.extend(items)
