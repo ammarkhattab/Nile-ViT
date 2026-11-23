@@ -7,6 +7,7 @@ import importlib.util
 import pytest
 
 from nilevit.roi_tiles import (
+    _BBOX_PAD_DEG,
     enumerate_roi_tiles,
     mgrs_tiles_in_bbox,
     tile_bbox,
@@ -24,13 +25,59 @@ def test_tile_for_point_known_locations() -> None:
     assert tile_for_point(33.0, -5.0) == "T30SUB"  # NW Africa
 
 
-def test_tile_bbox_is_the_100km_square() -> None:
+def _true_square_extent(
+    tile: str, around: tuple[float, float, float, float], step: float = 0.01
+) -> tuple[float, float, float, float]:
+    """The tile's real footprint, via the forward MGRS mapping on a fine grid.
+
+    Forward ``toMGRS`` is the reliable direction (the inverse round-trip is the one
+    that mis-resolves band-edge squares), so this is ground truth for the test.
+    """
+    west, south, east, north = around
+    lats: list[float] = []
+    lons: list[float] = []
+    lat = south
+    while lat <= north + 1e-9:
+        lon = west
+        while lon <= east + 1e-9:
+            if tile_for_point(lat, lon) == tile:
+                lats.append(lat)
+                lons.append(lon)
+            lon += step
+        lat += step
+    assert lats, f"{tile} not found in {around}"
+    return min(lons), min(lats), max(lons), max(lats)
+
+
+def test_tile_bbox_covers_the_100km_square() -> None:
+    """``tile_bbox`` is a padded SEARCH box: it must contain the whole square.
+
+    Since the band-boundary fix it returns sampled extents + ``_BBOX_PAD_DEG``
+    (via configs/roi_tiles.json), not the raw square, so it is checked for coverage
+    and a bounded margin rather than against raw-square corners. Too small would
+    drop real scenes; too large is harmless (``filter_items_for_tile`` selects by
+    tile id) but would mean the padding logic has drifted.
+    """
     west, south, east, north = tile_bbox("T36RUU")
-    # ~1deg square straddling 30N, centred near 31.4E.
-    assert 30.8 < west < 31.1
-    assert 29.7 < south < 29.9
-    assert 31.9 < east < 32.1
-    assert 30.6 < north < 30.8
+    t_west, t_south, t_east, t_north = _true_square_extent("T36RUU", (30.5, 29.5, 32.5, 31.0))
+
+    # ~1deg square straddling 30N, centred near 31.4E (sanity on the truth itself).
+    assert 30.8 < t_west < 31.1
+    assert 31.9 < t_east < 32.1
+
+    # Covers the square on every side (0.01 deg = the truth grid's resolution).
+    tol = 0.01
+    assert west <= t_west + tol
+    assert south <= t_south + tol
+    assert east >= t_east - tol
+    assert north >= t_north - tol
+
+    # ...and is not wildly larger: at most pad + one 0.05 deg sampling step per side.
+    max_margin = _BBOX_PAD_DEG + 0.05 + tol
+    assert t_west - west <= max_margin
+    assert t_south - south <= max_margin
+    assert east - t_east <= max_margin
+    assert north - t_north <= max_margin
 
 
 def test_small_bbox_enumeration() -> None:
