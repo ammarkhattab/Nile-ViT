@@ -238,8 +238,12 @@ def _stac_scenes(
     else:
         date_range = f"{year:04d}-01-01/{year:04d}-12-31"
     name = catalog_name or catalog_for_year(year)
-    catalog = open_catalog(name)
     try:
+        # open_catalog is a network call that fails the same ways the search does, so
+        # it belongs inside this guard. Left outside it, a CMR connect timeout
+        # propagated as exit 1 and killed the tile outright - 46 tiles in one 2018
+        # pass - instead of being reported as an empty, skippable result.
+        catalog = open_catalog(name)
         items = search_hls_items(
             catalog,
             tile,
@@ -251,7 +255,7 @@ def _stac_scenes(
     except RuntimeError as exc:
         # Catalog unreachable after retries: report no scenes so the driver logs this
         # tile as failed and moves on, rather than aborting the whole campaign.
-        console.print(f"[yellow]{tile}/{year}: STAC search failed ({exc})[/yellow]")
+        console.print(f"[yellow]{tile}/{year}: STAC unreachable ({exc})[/yellow]")
         return {}
     grouped = (
         one_scene_per_window(items, composite_dates) if composite_dates else hrefs_by_date(items)

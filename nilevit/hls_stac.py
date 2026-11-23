@@ -37,6 +37,17 @@ FMASK_ASSET = "Fmask"
 # PC's HLS collections begin here; earlier years must come from CMR.
 PC_FIRST_YEAR = 2020
 
+# Network timeouts and retry budget for catalog access (PRD risk I3).
+#
+# pystac_client hands its ``timeout`` to requests, which otherwise applies NONE:
+# a TCP connect that is accepted but never answered blocks forever. A 2018 CMR
+# campaign wedged on a single tile for ~26h this way - no traceback, no retry,
+# because nothing ever raised. A bounded timeout turns that silent hang into an
+# ordinary exception the retry below can act on.
+STAC_TIMEOUT = 30.0
+STAC_OPEN_ATTEMPTS = 4
+STAC_OPEN_DELAY = 3.0
+
 CATALOG_SPECS: dict[str, dict[str, Any]] = {
     "pc": {
         "url": PC_STAC_URL,
@@ -72,6 +83,14 @@ def configure_earthdata_gdal(cookie_file: str | None = None) -> None:
     os.environ.setdefault("GDAL_HTTP_NETRC", "YES")
     os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
     os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+    # Bound every band read too, for the same reason as STAC_TIMEOUT above: a
+    # stalled socket that never drops raises nothing, so `read_band_with_retry`
+    # never fires. LOW_SPEED_LIMIT/TIME is the one that catches a transfer that
+    # opens, delivers a trickle, and then goes quiet.
+    os.environ.setdefault("GDAL_HTTP_CONNECTTIMEOUT", "30")
+    os.environ.setdefault("GDAL_HTTP_TIMEOUT", "120")
+    os.environ.setdefault("GDAL_HTTP_LOW_SPEED_LIMIT", "1000")
+    os.environ.setdefault("GDAL_HTTP_LOW_SPEED_TIME", "60")
 
 
 def sensor_from_id(item_id: str) -> str | None:
@@ -130,22 +149,82 @@ def filter_items_for_tile(items: Iterable[Any], tile: str) -> list[Any]:
     return [it for it in items if tile_from_id(it.id) == tile]
 
 
-def open_catalog(catalog: str = "pc", stac_url: str | None = None) -> Any:
+def _retry(what: str, call: Any, *, attempts: int, delay: float) -> Any:
+    """Call ``call()``, retrying transient failures with exponential backoff.
+
+    Shared by the catalog-open and search paths: both talk to the same flaky CMR
+    endpoint and both must degrade to a RuntimeError the caller can turn into a
+    skipped tile, never an aborted campaign. The attempt body lives in a closure
+    so the ``try`` stays out of the loop (ruff PERF203).
+    """
+    import time
+
+    def _attempt() -> tuple[bool, Any, Exception | None]:
+        try:
+            return True, call(), None
+        except Exception as exc:
+            return False, None, exc
+
+    last: Exception | None = None
+    for attempt in range(attempts):
+        ok, result, last = _attempt()
+        if ok:
+            return result
+        if attempt < attempts - 1:
+            time.sleep(delay * (2**attempt))
+    raise RuntimeError(f"{what} failed after {attempts} attempts") from last
+
+
+def _open_timeout_kwargs(timeout: float) -> dict[str, Any]:
+    """``{"timeout": ...}`` when the installed pystac_client accepts it, else ``{}``.
+
+    Guards against a version without the parameter: passing it blindly would raise
+    TypeError on every attempt and silently turn every tile into a skip.
+    """
+    import inspect
+
+    import pystac_client
+
+    params = inspect.signature(pystac_client.Client.open).parameters
+    return {"timeout": timeout} if "timeout" in params else {}
+
+
+def open_catalog(
+    catalog: str = "pc",
+    stac_url: str | None = None,
+    *,
+    attempts: int = STAC_OPEN_ATTEMPTS,
+    retry_delay: float = STAC_OPEN_DELAY,
+    timeout: float = STAC_TIMEOUT,
+) -> Any:
     """Open a STAC catalog: ``pc`` (anonymous signing) or ``cmr`` (Earthdata auth).
 
     For ``cmr`` this also configures GDAL for Earthdata so the protected COGs can be
     streamed later by rioxarray.
+
+    Opening is a network call against the same endpoint as the search, and fails the
+    same ways: CMR has returned connect timeouts for a whole campaign while staying
+    reachable by curl. It is therefore bounded by ``timeout`` and retried, raising
+    RuntimeError once exhausted so the caller skips the tile (PRD risk I3).
     """
     import pystac_client
 
     spec = CATALOG_SPECS[catalog]
     url = stac_url or spec["url"]
+    kwargs: dict[str, Any] = _open_timeout_kwargs(timeout)
     if spec["sign"]:
         import planetary_computer as pc
 
-        return pystac_client.Client.open(url, modifier=pc.sign_inplace)
-    configure_earthdata_gdal()
-    return pystac_client.Client.open(url)
+        kwargs["modifier"] = pc.sign_inplace
+    else:
+        configure_earthdata_gdal()
+
+    return _retry(
+        f"opening STAC catalog {catalog!r}",
+        lambda: pystac_client.Client.open(url, **kwargs),
+        attempts=attempts,
+        delay=retry_delay,
+    )
 
 
 def cloud_cover(item: Any) -> float:
@@ -161,22 +240,12 @@ def _search_with_retry(catalog: Any, kwargs: dict[str, Any], *, attempts: int, d
     load, which pystac_client surfaces as ``APIError: <html>``. Retrying with
     exponential backoff clears it; without this a single blip kills a whole tile.
     """
-    import time
-
-    def _try_search():
-        try:
-            return list(catalog.search(**kwargs).items()), None
-        except Exception as exc:
-            return None, exc
-
-    last: Exception | None = None
-    for attempt in range(attempts):
-        items, last = _try_search()
-        if items is not None:
-            return items
-        if attempt < attempts - 1:
-            time.sleep(delay * (2**attempt))
-    raise RuntimeError(f"STAC search failed after {attempts} attempts") from last
+    return _retry(
+        "STAC search",
+        lambda: list(catalog.search(**kwargs).items()),
+        attempts=attempts,
+        delay=delay,
+    )
 
 
 def search_hls_items(
