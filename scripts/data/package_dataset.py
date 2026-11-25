@@ -50,6 +50,47 @@ class SmallPoolError(RuntimeError):
     """Raised when a global artifact would be overwritten from too few tiles."""
 
 
+# Outcomes of packaging one tile.
+OK, EMPTY, FAILED = "ok", "empty", "failed"
+
+
+def labeled_row_count(path: Path) -> int | None:
+    """Rows in a labeled parquet, read from metadata alone; None if missing/unreadable."""
+    if not path.exists():
+        return None
+    try:
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        return None
+
+
+def package_tile(
+    tile: str,
+    labeled_parquet: Path,
+    steps: list[tuple[str, list[str]]],
+    *,
+    run=None,
+) -> tuple[str, str | None]:
+    """Run labels then meteo for one tile -> (outcome, failed step or None).
+
+    A tile whose samples ALL fall outside the ROI leaves a labeled parquet with zero
+    rows. Meteo then has no dates to build a window from and exits 2 ("missing ERA5
+    or CHIRPS files for the date window"), which used to be reported as a failure on
+    every run although there is nothing to package. Such a tile is now EMPTY: the
+    meteo step is skipped and nothing is retried.
+    """
+    run = run or subprocess.run  # resolved per call, so tests can patch it
+    for name, cmd in steps:
+        if name == "meteo" and labeled_row_count(labeled_parquet) == 0:
+            return EMPTY, None
+        result = run(cmd, check=False)
+        if result.returncode != 0:
+            return FAILED, name
+    return OK, None
+
+
 def tiled_inputs(interim: Path, year: int, subset: set[str] | None) -> list[tuple[str, Path]]:
     """Find (tile, parquet) for every 05b index of the given year."""
     out: list[tuple[str, Path]] = []
@@ -139,8 +180,11 @@ def aggregate_class_weights(scratch: Path, year: int, out: Path, *, force: bool 
     years: set[str] = set()
     for path in sorted(scratch.glob("weights_*_*.json")):
         report = json.loads(path.read_text())
-        for cls, value in report.get("counts", {}).items():
-            counts[int(cls)] += int(value)
+        tile_counts = {int(c): int(v) for c, v in report.get("counts", {}).items()}
+        if not sum(tile_counts.values()):
+            continue  # empty tile (all samples outside ROI): contributes nothing
+        for cls, value in tile_counts.items():
+            counts[cls] += value
         years.add(path.stem.rsplit("_", 1)[-1])
         n_tiles += 1
 
@@ -187,10 +231,10 @@ def aggregate_meteo_norm(interim: Path, year: int, out: Path, *, force: bool = F
     for parquet in sorted(interim.glob("tiles_*_*_labeled.parquet")):
         parts = parquet.stem.split("_")  # tiles_<TILE>_<YEAR>_labeled
         tile, tile_year = parts[1], parts[2]
-        years.add(tile_year)
         store = interim / f"tiles_{tile}_{tile_year}_meteo.zarr"
-        if not store.exists():
+        if not store.exists() or labeled_row_count(parquet) == 0:
             continue
+        years.add(tile_year)
         index = gpd.read_parquet(parquet).set_index("sample_id")
         dataset = xr.open_zarr(store, consolidated=False)
         order = [str(s) for s in dataset["sample"].values]
@@ -273,7 +317,7 @@ def main(
         console.print("\n[yellow]Dry run - nothing packaged.[/yellow]")
         raise typer.Exit(code=0)
 
-    n_ok, n_fail = 0, 0
+    n_ok, n_empty, n_fail = 0, 0, 0
     if not aggregate_only:
         scratch.mkdir(parents=True, exist_ok=True)
         for tile, _ in work:
@@ -299,17 +343,18 @@ def main(
                     ),
                 ),
             ]
-            ok = True
-            for name, cmd in steps:
-                result = subprocess.run(cmd, check=False)
-                if result.returncode != 0:
-                    ok = False
-                    console.print(f"[red]FAILED[/red] {tile} {name} (exit {result.returncode})")
-                    break
-            if ok:
+            labeled = interim / f"tiles_{tile}_{year}_labeled.parquet"
+            outcome, failed_step = package_tile(tile, labeled, steps)
+            if outcome == OK:
                 n_ok += 1
+            elif outcome == EMPTY:
+                n_empty += 1
+                console.print(
+                    f"[dim]EMPTY {tile}: every sample outside the ROI - nothing to package[/dim]"
+                )
             else:
                 n_fail += 1
+                console.print(f"[red]FAILED[/red] {tile} {failed_step}")
                 if stop_on_fail:
                     console.print("[red]--stop-on-fail set; aborting.[/red]")
                     raise typer.Exit(code=1)
@@ -335,7 +380,10 @@ def main(
     console.print(f"wrote {norm_out}  (z-score on {norm['n_train_samples']} train samples)")
 
     if not aggregate_only:
-        console.print(f"\n[green]Packaging: {n_ok} ok, {n_fail} failed.[/green]")
+        console.print(
+            f"\n[green]Packaging: {n_ok} ok, {n_empty} empty "
+            f"(all samples outside ROI), {n_fail} failed.[/green]"
+        )
         if n_fail:
             console.print("[yellow]Re-run to retry failed tiles.[/yellow]")
             raise typer.Exit(code=1)

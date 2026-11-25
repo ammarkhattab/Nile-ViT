@@ -574,12 +574,21 @@ def main(
             continue
 
         stack = np.stack(band_arrs, axis=0).astype(np.uint16)  # (6, H, W)
+        # No Fmask at all (disk scenes without one) is a known, documented case and
+        # keeps the legacy "treat as clear" behaviour. An Fmask that EXISTS but cannot
+        # be read is different: treating it as clear would write every patch with
+        # cloud_pct = 0 regardless of the real sky, silently corrupting a quality
+        # flag downstream filters trust. Skip the date instead, like a bad band.
         fmask = np.zeros((h, w), dtype=np.uint8)
         if fmask_source is not None:
             try:
                 fmask = read_band_with_retry(fmask_source)
-            except RuntimeError:
-                console.print(f"  [yellow]{d}: Fmask unreadable; treating as clear[/yellow]")
+            except RuntimeError as exc:
+                console.print(f"  [yellow]SKIP {d}: Fmask unreadable ({exc})[/yellow]")
+                red_da.close()
+                total_dropped += len(grid)
+                total_failed_dates += 1
+                continue
         try:
             red = read_band_with_retry(band_sources["red"])
         except RuntimeError as exc:

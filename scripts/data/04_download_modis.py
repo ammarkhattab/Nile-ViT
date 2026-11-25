@@ -140,6 +140,57 @@ def is_terra(item_id: str) -> bool:
     return item_id.upper().startswith("MOD")
 
 
+def is_readable_raster(path: Path) -> bool:
+    """True if every pixel of ``path`` decodes; False for a truncated/corrupt file.
+
+    Opening a GeoTIFF only reads its header, so a file cut short mid-write still
+    opens fine and fails later, at pixel decode, with "ZIPDecode ... incorrect
+    header check". Reading the whole band is the only reliable check, and these ROI
+    clips are small (0.1-9 MB).
+    """
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            src.read()
+    except Exception:
+        return False
+    return True
+
+
+def should_skip_existing(out_path: Path, *, overwrite: bool) -> tuple[bool, str]:
+    """-> (skip, reason). Skip only a file that exists AND reads end to end.
+
+    The old check was existence alone, so one interrupted download stayed broken
+    forever: every re-run printed ``SKIP (exists)`` and the label build later died
+    on it. 9 such files were found in 2017's raw MODIS.
+    """
+    if overwrite or not out_path.exists():
+        return False, "missing" if not out_path.exists() else "overwrite"
+    if is_readable_raster(out_path):
+        return True, "exists"
+    return False, "corrupt"
+
+
+def partial_path(out_path: Path) -> Path:
+    """Temporary write target: ``*.tif.part`` never matches the ``*.tif`` globs."""
+    return out_path.with_name(out_path.name + ".part")
+
+
+def write_atomic(clipped, out_path: Path) -> None:
+    """Write ``clipped`` to a ``.part`` file, then rename it into place.
+
+    The rename is atomic on one filesystem, so ``out_path`` is either absent or a
+    complete file - never a half-written one that a later run would trust.
+    """
+    tmp = partial_path(out_path)
+    try:
+        clipped.rio.to_raster(tmp, driver="GTiff", compress="deflate")
+        tmp.replace(out_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def pick_band_asset(asset_keys: list[str], pattern: str) -> str | None:
     """Choose the COG asset key matching `pattern` (case-insensitive substring).
 
@@ -214,7 +265,7 @@ def main(
                 raise ValueError("--start must be <= --end")
         else:
             console.print(
-                "[red]ERROR[/red] supply one of: --year, --month, " "OR both --start and --end."
+                "[red]ERROR[/red] supply one of: --year, --month, OR both --start and --end."
             )
             raise typer.Exit(code=2)
     except ValueError as exc:
@@ -327,10 +378,13 @@ def main(
             continue
 
         out_path = output_dir / f"{it.id}.{band_key}.{roi_tag}.tif"
-        if out_path.exists() and not overwrite:
+        skip, reason = should_skip_existing(out_path, overwrite=overwrite)
+        if skip:
             console.print(f"  [yellow]SKIP[/yellow] {out_path.name} (exists)")
             n_skip += 1
             continue
+        if reason == "corrupt":
+            console.print(f"  [yellow]REDO[/yellow] {out_path.name} (unreadable; re-downloading)")
 
         href = it.assets[band_key].href  # already signed by the modifier
         try:
@@ -355,7 +409,13 @@ def main(
             n_fail += 1
             continue
 
-        clipped.rio.to_raster(out_path, compress="deflate")
+        try:
+            write_atomic(clipped, out_path)
+        except Exception as exc:
+            da.close()
+            console.print(f"  [red]FAIL[/red] {it.id}: write failed: {exc}")
+            n_fail += 1
+            continue
         da.close()
         mb = out_path.stat().st_size / 1e6
         console.print(f"  [green]OK[/green] {out_path.name} ({mb:.2f} MB)")
